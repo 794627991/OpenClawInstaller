@@ -9,6 +9,7 @@
 """
 import ctypes
 import os
+import time
 from ctypes import wintypes
 
 user32 = ctypes.windll.user32
@@ -78,6 +79,14 @@ _OLD_PROC = None
 _PROC_FN = None
 _ACTIVE = None   # 活跃 TrayIcon 实例（回调需要）
 
+_DBG_PATH = os.path.expanduser("~/.openclaw/tray-debug.log")
+def _dbg(s):
+    try:
+        with open(_DBG_PATH, "a", encoding="utf-8") as f:
+            f.write("%s %s\n" % (time.time(), s))
+    except Exception:
+        pass
+
 MSG_ACTION_FROM_MENU = 0x401 + 101   # 毛玻璃菜单动作（与 AcrylicMenu.MSG_ACTION 一致）
 _MENU_ITEMS = []                     # 毛玻璃菜单项（主线程按索引提取动作）
 
@@ -88,13 +97,13 @@ MSG_ACTION_EXEC = 0x401 + 102   # 延迟执行（务必离开 WndProc 栈再跑 
 def _hook_proc(hwnd, msg, wparam, lparam):
     """宿主 WndProc：托盘 WM_USER+100 分发；菜单动作 WM_USER+101 先缓存，PostMessage 延迟执行"""
     if msg == MSG_ACTION_FROM_MENU and _ACTIVE:
-        # 立即用 PostMessage 排下一条消息再执行（本 WndProc 返回后消息栈已释放，
-        # 同步 evaluate_js 的回调能正常被消息泵处理 → 不死锁）
+        _dbg("hook 收到 MSG_ACTION wparam=%s" % wparam)
         user32.PostMessageW(hwnd, MSG_ACTION_EXEC, wparam, 0)
         return 0
     if msg == MSG_ACTION_EXEC and _ACTIVE:
         try:
             idx = int(wparam)
+            _dbg("hook 收到 MSG_ACTION_EXEC idx=%s items=%d" % (idx, len(_MENU_ITEMS)))
             if 0 <= idx < len(_MENU_ITEMS):
                 fn = _MENU_ITEMS[idx][1]
                 if callable(fn):
@@ -242,8 +251,8 @@ class TrayIcon:
             if self.on_click:
                 self.on_click()
             return
-        # 毛玻璃自绘菜单（默认关闭——右键稳定性优先；OCW_ACRYLIC_MENU=1 启用，供排错）
-        if os.environ.get("OCW_ACRYLIC_MENU") == "1":
+        # 毛玻璃自绘菜单（默认启用；OCW_ACRYLIC_MENU=0 显式回退原生）
+        if os.environ.get("OCW_ACRYLIC_MENU", "1") != "0":
             try:
                 items = []
                 for idx, (label, fn) in enumerate(self.menu_items):
@@ -434,6 +443,15 @@ class AcrylicMenu:
                 h += 9
         return self.WIDTH, h
 
+    def _precompute_hits(self):
+        """预计算命中区域（不再依赖 WM_PAINT——透明背景窗口可能无 paint 流程）"""
+        self._hits = []
+        y = self.MARGIN
+        for idx, (_l, _f, sep) in enumerate(self.items):
+            self._hits.append((y, y + self.ITEM_H))
+            y += self.ITEM_H + (9 if sep else 0)
+
+
     def _reg_class(self):
         class WNDCLASSW(ctypes.Structure):
             _fields_ = [("style", wintypes.UINT), ("lpfnWndProc", ctypes.c_void_p),
@@ -466,11 +484,13 @@ class AcrylicMenu:
         elif msg == WM_LBUTTONUP:
             y = (int(lparam) >> 16) & 0xFFFF
             h = self._hit(y)
+            _dbg("菜单 WM_LBUTTONUP y=%s hit=%d items=%d" % (y, h, len(self.items)))
             if 0 <= h < len(self.items):
                 try:
                     user32.PostMessageW(self.owner, MSG_ACTION_FROM_MENU, h, 0)
-                except Exception:
-                    pass
+                    _dbg("已 post owner msg_action h=%s" % h)
+                except Exception as e:
+                    _dbg("post 失败 %r" % e)
             user32.DestroyWindow(hwnd)
         elif msg == WM_KEYDOWN and wparam == 27:
             user32.DestroyWindow(hwnd)
@@ -547,6 +567,7 @@ class AcrylicMenu:
             if not hwnd:
                 return
             self._hwnd = hwnd
+            self._precompute_hits()
             # 真 Acrylic：DWM blur + 深色 tint（BGRA: alpha 0x88, 蓝黑 0x0A141E）
             enable_acrylic(hwnd, color=0x880A141E)
             user32.ShowWindow(hwnd, 4)   # SW_SHOWNOACTIVATE
