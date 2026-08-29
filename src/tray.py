@@ -759,10 +759,13 @@ class AcrylicPanel:
         self._gwbd_y = y; y += 25
         self._sep2 = y - 2; y += 13
         self._btn_rows = []
-        # 按钮网格：main/quit 通栏；btn 双列（落单自动双宽）
+        # 按钮网格：main/quit 通栏；btn 双列（落单自动双宽）；toggle 不进网格（画在标题行）
         i = 0
         while i < len(self.actions):
             kind, label, fn = self.actions[i]
+            if kind == "toggle":
+                i += 1
+                continue
             if kind in ("main", "quit"):
                 self._btn_rows.append((m, y, self.WIDTH - m, y + self.BTN_H, kind, i))
                 y += self.BTN_H + self.BTN_GAP
