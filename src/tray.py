@@ -700,34 +700,32 @@ class _SIZEX(ctypes.Structure):
 
 class AcrylicPanel:
     """07 式托盘卡片面板 v2：原版配色（近黑深底+浅灰文字+绿/黄/红状态点+蓝 Toggle+分段卡）
-    行结构：标题+Toggle / 状态行(点+文字+addr+右侧版本) / 模型行 / 分隔 / Gateway 卡头+badge /
+    行结构：标题(白,右侧版本小字) / 状态行(点+文字+addr) / 模型行 / 分隔 / Gateway 卡头+badge /
             卡体行 / 分隔 / 按钮组
-    spec = {"title","version","status","status_text","addr","model","badge","node","toggle_on"}
+    spec = {"title","version","status","status_text","addr","model","badge","node"}
     actions = [(kind, label, fn)]：
-        kind= "toggle" 标题行右侧开关 | "main" 通栏主按钮 | "btn" 双列 | "quit" 通栏"""
+        kind= "main" 通栏主按钮 | "btn" 双列 | "quit" 通栏（每种都计入 _MENU_ITEMS 动作链）"""
     WIDTH = 320
     MARGIN = 16
     RADIUS = 14
     BTN_H = 38
     BTN_GAP = 8
 
-    _DOT = {"green": 0x35C97E, "yellow": 0xF0C043, "red": 0xE5564E}
-    _TCLR = {"green": 0x8FDDB4, "yellow": 0xF0D288, "red": 0xF2A28C}
+    _DOT = {"green": 0x7EC935, "yellow": 0x43C0F0, "red": 0x4E56E5}
+    _TCLR = {"green": 0xB4DD8F, "yellow": 0x88D2F0, "red": 0x8CA2F2}
 
-    C_BG = 0x15161C
-    C_EDGE = 0x2A2C36
-    C_TXT = 0xF2F2F6
-    C_SUB = 0x9A9CA8
-    C_WEAK = 0x63656F
-    C_SEP = 0x23252E
-    C_BTN = 0x20222B
-    C_BTN_HOVER = 0x2C2E3A
-    C_MAIN = 0x2E6BDB
-    C_MAIN_HOVER = 0x3E7CEB
-    C_TOG_ON = 0x3B82F6
-    C_TOG_OFF = 0x33343E
-    C_BADGE_BG = 0x23242E
-    C_GOOD = 0x35C97E
+    C_BG = 0x1C1615
+    C_EDGE = 0x362C2A
+    C_TXT = 0xF6F2F2
+    C_SUB = 0xA89C9A
+    C_WEAK = 0x6F6563
+    C_SEP = 0x2E2523
+    C_BTN = 0x2B2220
+    C_BTN_HOVER = 0x3A2E2C
+    C_MAIN = 0xDB6B2E
+    C_MAIN_HOVER = 0xEB7C3E
+    C_BADGE_BG = 0x2E2423
+    C_GOOD = 0x7EC935
 
     def __init__(self, owner_hwnd, spec, actions):
         self.owner = int(owner_hwnd)
@@ -736,7 +734,6 @@ class AcrylicPanel:
         self._hwnd = None
         self._hover = -1
         self._btn_rows = []         # [(x0,y0,x1,y1,kind,action_idx)]
-        self._toggle_rect = None
         self._hdr_y = self._st_y = self._md_y = self._gwhd_y = self._gwbd_y = 0
         self._sep1 = self._sep2 = 0
         self._w = self.WIDTH
@@ -759,13 +756,10 @@ class AcrylicPanel:
         self._gwbd_y = y; y += 25
         self._sep2 = y - 2; y += 13
         self._btn_rows = []
-        # 按钮网格：main/quit 通栏；btn 双列（落单自动双宽）；toggle 不进网格（画在标题行）
+        # 按钮网格：main/quit 通栏；btn 双列（落单自动双宽）
         i = 0
         while i < len(self.actions):
             kind, label, fn = self.actions[i]
-            if kind == "toggle":
-                i += 1
-                continue
             if kind in ("main", "quit"):
                 self._btn_rows.append((m, y, self.WIDTH - m, y + self.BTN_H, kind, i))
                 y += self.BTN_H + self.BTN_GAP
@@ -786,8 +780,6 @@ class AcrylicPanel:
                 else:
                     self._btn_rows.append((m, y, self.WIDTH - m, y + self.BTN_H, "btn", row[0][1]))
                     y += self.BTN_H + self.BTN_GAP
-        self._toggle_rect = (self.WIDTH - m - 42, self._hdr_y + 4,
-                             self.WIDTH - m, self._hdr_y + 24)
         self._h = y + 16
 
     def _font(self):
@@ -802,11 +794,6 @@ class AcrylicPanel:
         for idx, (x0, y0, x1, y1, _k, ai) in enumerate(self._btn_rows):
             if x0 <= x <= x1 and y0 <= y <= y1:
                 return ai
-        if self._toggle_rect:
-            x0, y0, x1, y1 = self._toggle_rect
-            if x0 - 4 <= x <= x1 + 4 and y0 - 4 <= y <= y1 + 4:
-                if self.actions and self.actions[0][0] == "toggle":
-                    return 0
         return -1
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
@@ -883,17 +870,14 @@ class AcrylicPanel:
             gdi32.SetTextColor(hdc, self.C_TXT)
             t = self.spec.get("title", "OpenClaw")
             gdi32.TextOutW(hdc, m, self._hdr_y, t, len(t))
-            # ② Toggle（标题行右）
-            if self._toggle_rect:
-                tx0, ty0, tx1, ty1 = self._toggle_rect
-                on = bool(self.spec.get("toggle_on"))
-                self._fill_rect(hdc, tx0, ty0, tx1, ty1,
-                                self.C_TOG_ON if on else self.C_TOG_OFF, 20)
-                c = tx0 + 18 if on else tx0 + 2
-                b2 = gdi32.CreateSolidBrush(0xF4F5F8)
-                gdi32.SelectObject(hdc, b2)
-                gdi32.Ellipse(hdc, c, ty0 + 2, c + 14, ty0 + 16)
-                gdi32.DeleteObject(b2)
+            # ② 版本号（标题行右，避免与状态行地址重叠）
+            gdi32.SelectObject(hdc, self._hfont_s)
+            gdi32.SetTextColor(hdc, self.C_WEAK)
+            gdi32.SetTextAlign(hdc, TA_RIGHT)
+            v = self.spec.get("version") or ""
+            if v:
+                gdi32.TextOutW(hdc, w - m, self._hdr_y + 8, v, len(v))
+            gdi32.SetTextAlign(hdc, TA_LEFT)
             # ③ 状态行：点 + 状态文字 + addr，右侧版本
             gdi32.SelectObject(hdc, self._hfont)
             st = self.spec.get("status", "red")
@@ -906,15 +890,11 @@ class AcrylicPanel:
             gdi32.TextOutW(hdc, m + 18, self._st_y, stt, len(stt))
             addr = self.spec.get("addr", "")
             if addr:
+                szs = _SIZEX()
+                gdi32.GetTextExtentPoint32W(hdc, stt, len(stt), ctypes.byref(szs))
                 gdi32.SetTextColor(hdc, self.C_SUB)
-                txt = "  ·  " + addr
-                gdi32.TextOutW(hdc, m + 24 + len(stt) * 14, self._st_y, txt, len(txt))
-            gdi32.SelectObject(hdc, self._hfont_s)
-            gdi32.SetTextColor(hdc, self.C_WEAK)
-            gdi32.SetTextAlign(hdc, TA_RIGHT)
-            v = self.spec.get("version") or ""
-            gdi32.TextOutW(hdc, w - m, self._st_y + 3, v, len(v))
-            gdi32.SetTextAlign(hdc, TA_LEFT)
+                txt = " · " + addr
+                gdi32.TextOutW(hdc, m + 18 + szs.cx + 8, self._st_y, txt, len(txt))
             # ④ 模型行（弱灰）
             gdi32.SetTextColor(hdc, self.C_WEAK)
             md = self.spec.get("model", "")
@@ -945,7 +925,7 @@ class AcrylicPanel:
                 gdi32.GetTextExtentPoint32W(hdc, bdg, len(bdg), ctypes.byref(sz))
                 self._fill_rect(hdc, w - m - sz.cx - 12, self._gwhd_y,
                                 w - m, self._gwhd_y + 17, self.C_BADGE_BG, 12)
-                gdi32.SetTextColor(hdc, 0xC9CBD4)
+                gdi32.SetTextColor(hdc, 0xD4CBC9)
                 gdi32.TextOutW(hdc, w - m - sz.cx - 6, self._gwhd_y + 1, bdg, len(bdg))
             # ⑦ 卡体行
             gdi32.SelectObject(hdc, self._hfont_s)
@@ -963,7 +943,7 @@ class AcrylicPanel:
                     tc = 0xFFFFFF
                 else:
                     bg = self.C_BTN_HOVER if hv else self.C_BTN
-                    tc = 0xD6D8E0
+                    tc = 0xE0D8D6
                 self._fill_rect(hdc, x0, y0, x1, y1, bg, 18)
                 sz = _SIZEX()
                 gdi32.GetTextExtentPoint32W(hdc, label, len(label), ctypes.byref(sz))

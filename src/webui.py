@@ -1601,26 +1601,6 @@ def main():
                     _tray_obj.update_tip(tip)
                 except Exception:
                     pass
-            def _toggle_gw():
-                """面板连接开关：运行中→stop；未运行→start（后台线程 + 全局互斥）"""
-                def run():
-                    try:
-                        on = api._ping_http()
-                        with api._gw_lock:
-                            if on:
-                                api.push_log("  托盘开关：停止网关…")
-                                core.run_cmd(claw_cmd() + " gateway stop",
-                                             callback=api.push_log, timeout=40)
-                                api.push_toast("🛑 网关已停止", True)
-                            else:
-                                api.push_log("  托盘开关：启动网关…")
-                                core.run_cmd(claw_cmd() + " gateway start",
-                                             callback=api.push_log, timeout=40)
-                                api.push_toast("✅ 网关启动中…", False)
-                    except Exception as e:
-                        api.push_toast("⚠️ 切换失败: %s" % e, False)
-                threading.Thread(target=run, daemon=True).start()
-
             def _panel_spec():
                 """07 式面板内容：状态三色 + 版本 + 地址/模型 + Gateway 卡（打开时抓快照）"""
                 if api._health_ok():
@@ -1638,8 +1618,7 @@ def main():
                         "status": st, "status_text": stt,
                         "addr": "127.0.0.1:%s" % api._gateway_port(),
                         "model": api._model_display(),
-                        "badge": "Local", "node": "本机 1 节点",
-                        "toggle_on": st != "red"}
+                        "badge": "Local", "node": "本机 1 节点"}
 
             _tray_obj = None
             def _panel_route():
@@ -1647,7 +1626,6 @@ def main():
                 if os.environ.get("OCW_PANEL", "1") != "0":
                     try:
                         _tray.open_panel(_hwnd, _panel_spec(), [
-                            ("toggle", "连接网关", _toggle_gw),
                             ("main", "打开工作台", _show_menu),
                             ("btn", "控制面板", _open_dash),
                             ("btn", "重新配置", _reconfig),
