@@ -252,7 +252,14 @@ class TrayIcon:
             if self.on_click:
                 self.on_click()
             return
-        # 默认：原生系统菜单（稳定）；OCW_ACRYLIC_MENU=1 才启用毛玻璃自绘菜单
+        # 面板路由：外部（webui）注入 _route → 右键弹 07 式卡片面板（默认）
+        if getattr(self, "_route", None) is not None:
+            try:
+                self._route()
+                return
+            except Exception as e:
+                _dbg("面板路由异常，回退系统菜单: %r" % e)
+        # 回退链：OCW_ACRYLIC_MENU=1 → 毛玻璃自绘菜单；默认原生系统菜单
         _dbg("show_menu items=%d acrylic=%s" % (len(self.menu_items),
              os.environ.get("OCW_ACRYLIC_MENU", "0")))
         if os.environ.get("OCW_ACRYLIC_MENU", "0") != "0":
@@ -443,8 +450,8 @@ class _PAINTSTRUCT(ctypes.Structure):
                 ("fIncUpdate", wintypes.BOOL),
                 ("rgbReserved", ctypes.c_byte * 32)]
 
-# ---- 菜单窗口：全局唯一注册 + 静态 WndProc（防止多次弹窗时回调对象被 GC 悬空） ----
-_MENU_CLASS_OK = False
+# ---- 菜单/面板窗口：全局唯一注册 + 静态 WndProc（防止多次弹窗时回调对象被 GC 悬空） ----
+_MENU_CLASS_CACHE = {}      # 类名 -> True（进程内只注册一次）
 _MENU_STATIC_PROC = None    # WINFUNCTYPE 全局引用：类注册的 proc 地址依赖它存活
 _MENU_INSTANCES = {}        # int(hwnd) -> 实例
 
@@ -457,10 +464,11 @@ def _menu_static_wndproc(hwnd, msg, wparam, lparam):
     return inst._wndproc(hwnd, msg, wparam, lparam)
 
 
-def _menu_reg_class():
-    """注册菜单窗口类（进程内只注册一次；已存在(1410)视为成功）。"""
-    global _MENU_CLASS_OK, _MENU_STATIC_PROC
-    if _MENU_CLASS_OK:
+def _menu_reg_class(cls_name="OcwGlassMenuV3"):
+    """注册弹窗类（每个类名只注册一次；已存在(1410)视为成功）。
+    菜单用 OcwGlassMenuV3、面板用 OcwPanelV1——共用静态 proc 分发"""
+    global _MENU_STATIC_PROC
+    if _MENU_CLASS_CACHE.get(cls_name):
         return True
     try:
         if _MENU_STATIC_PROC is None:
@@ -477,13 +485,13 @@ def _menu_reg_class():
         wc = WNDCLASSW()
         wc.hInstance = kernel32.GetModuleHandleW(None)
         wc.lpfnWndProc = ctypes.cast(_MENU_STATIC_PROC, ctypes.c_void_p).value
-        wc.lpszClassName = "OcwGlassMenuV3"
+        wc.lpszClassName = cls_name
         wc.hCursor = user32.LoadCursorW(None, ctypes.c_void_p(32649))
         cls = user32.RegisterClassW(ctypes.byref(wc))
         if cls or user32.GetLastError() == 1410:
-            _MENU_CLASS_OK = True
+            _MENU_CLASS_CACHE[cls_name] = True
             return True
-        _dbg("菜单类注册失败 last=%s" % user32.GetLastError())
+        _dbg("菜单类注册失败 %s last=%s" % (cls_name, user32.GetLastError()))
         return False
     except Exception as e:
         _dbg("菜单类注册异常 %r" % e)
@@ -623,7 +631,7 @@ class AcrylicMenu:
             hwnd = user32.CreateWindowExW(
                 0x8 | 0x80 | WS_EX_NOACTIVATE,   # TOPMOST | TOOLWINDOW | NOACTIVATE（非 Layered，与 DWM blur 共存）
                 "OcwGlassMenuV3", "OpenClaw", 0x80000000,   # WS_POPUP
-                x, y, w, h, self.owner, None, kernel32.GetModuleHandleW(None), None)
+                x, y, w, h, None, None, kernel32.GetModuleHandleW(None), None)
             if not hwnd:
                 _dbg("菜单 CreateWindowExW 失败")
                 return
@@ -656,3 +664,299 @@ class AcrylicMenu:
 
 def open_acrylic_menu(owner_hwnd, items):
     return AcrylicMenu(owner_hwnd, items).show()
+
+
+# ============================================================
+# 07 式卡片面板：状态点 + 标题 + 键值行 + 按钮网格（GDI 自绘深色圆角卡）
+# 动作链：按钮点击 → PostMessage 宿主(MSG_ACTION) → 主窗口钩子 MSG_ACTION_EXEC → fn
+# 关闭：点击空白/按钮、ESC、失焦（点面板外自动关——面板本身激活）
+# ============================================================
+gdi32.SetTextAlign.argtypes = [ctypes.c_void_p, wintypes.UINT]
+gdi32.SetTextAlign.restype = wintypes.UINT
+gdi32.Ellipse.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                          ctypes.c_int, ctypes.c_int]
+gdi32.Ellipse.restype = wintypes.BOOL
+gdi32.GetTextExtentPoint32W.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR,
+                                        ctypes.c_int, ctypes.c_void_p]
+gdi32.GetTextExtentPoint32W.restype = wintypes.BOOL
+gdi32.MoveToEx.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+gdi32.MoveToEx.restype = wintypes.BOOL
+gdi32.LineTo.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+gdi32.LineTo.restype = wintypes.BOOL
+gdi32.CreatePen.argtypes = [ctypes.c_int, ctypes.c_int, wintypes.DWORD]
+gdi32.CreateSolidBrush.argtypes = [wintypes.DWORD]
+user32.BeginPaint.argtypes = [wintypes.HWND, ctypes.c_void_p]
+user32.EndPaint.argtypes = [wintypes.HWND, ctypes.c_void_p]
+user32.InvalidateRect.argtypes = [wintypes.HWND, ctypes.c_void_p, wintypes.BOOL]
+user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+
+TA_LEFT = 0
+TA_RIGHT = 2
+
+
+class _SIZEX(ctypes.Structure):
+    _fields_ = [("cx", ctypes.c_int), ("cy", ctypes.c_int)]
+
+
+class AcrylicPanel:
+    """spec = {"status": "green|yellow|red", "title": str, "version": str,
+              "rows": [(key, val), ...]}
+    actions = [(label, fn), ...]：首按钮通栏主色，其余两列"""
+    WIDTH = 280
+    MARGIN = 14
+    RADIUS = 14
+    BTN_H = 38
+    BTN_GAP = 8
+    ROW_H = 24
+
+    _DOT = {"green": 0x3FC27B, "yellow": 0xF2C153, "red": 0xE5634F}
+    _TXT = {"green": "运行中", "yellow": "启动中…", "red": "未运行"}
+    _TCLR = {"green": 0x7AD9A4, "yellow": 0xF2D180, "red": 0xF0A98F}
+
+    C_BG = 0x1B202B
+    C_EDGE = 0x39415A
+    C_KEY = 0x8A90A5
+    C_VAL = 0xE9ECF3
+    C_SEP = 0x262C3E
+    C_BTN = 0x242B3C
+    C_BTN_HOVER = 0x2E3750
+    C_PRIMARY = 0x2E6BDB
+    C_PRIMARY_HOVER = 0x3E7CEB
+
+    def __init__(self, owner_hwnd, spec, actions):
+        self.owner = int(owner_hwnd)
+        self.spec = spec
+        self.actions = actions
+        self._hwnd = None
+        self._hover_btn = -1
+        self._status_y = 0
+        self._title_y = 0
+        self._sep1 = 0
+        self._sep2 = 0
+        self._row_ys = []
+        self._btns = []      # [(x0,y0,x1,y1)] 与 actions 同序
+        self._w = self.WIDTH
+        self._h = 0
+        self._hfont = None
+        self._hfont_b = None
+        self._hfont_s = None
+
+    def _calc(self):
+        """布局单源：paint 与 命中 共用（同一套坐标，绝不猜）"""
+        rows = self.spec.get("rows") or []
+        n = len(self.actions)
+        m = self.MARGIN
+        y = m
+        self._status_y = y; y += 26
+        self._title_y = y; y += 26
+        self._sep1 = y; y += 10
+        self._row_ys = []
+        for _r in rows:
+            self._row_ys.append(y); y += self.ROW_H
+        self._sep2 = y; y += 11
+        self._btns = []
+        if n:
+            self._btns.append((m, y, self.WIDTH - m, y + self.BTN_H))
+            y += self.BTN_H + self.BTN_GAP
+            if n >= 2:
+                half = int((self.WIDTH - 2 * m - self.BTN_GAP) / 2)
+                for i in range(n - 1):
+                    row, col = divmod(i, 2)
+                    bx = m + col * (half + self.BTN_GAP)
+                    by = y + row * (self.BTN_H + self.BTN_GAP)
+                    self._btns.append((bx, by, bx + half, by + self.BTN_H))
+                y = self._btns[-1][3]
+        self._h = y + 16
+
+    def _font(self):
+        self._hfont = gdi32.CreateFontW(-13, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0,
+                                        "Microsoft YaHei UI")
+        self._hfont_b = gdi32.CreateFontW(-15, 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 0, 0,
+                                          "Microsoft YaHei UI")
+        self._hfont_s = gdi32.CreateFontW(-11, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0,
+                                          "Microsoft YaHei UI")
+
+    def _hit_btn(self, x, y):
+        for idx, (x0, y0, x1, y1) in enumerate(self._btns):
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return idx
+        return -1
+
+    def _wndproc(self, hwnd, msg, wparam, lparam):
+        try:
+            if msg == WM_MOUSEMOVE:
+                x, y = (int(lparam)) & 0xFFFF, (int(lparam) >> 16) & 0xFFFF
+                h = self._hit_btn(x, y)
+                if h != self._hover_btn:
+                    self._hover_btn = h
+                    user32.InvalidateRect(hwnd, None, True)
+            elif msg == WM_LBUTTONUP:
+                x, y = (int(lparam)) & 0xFFFF, (int(lparam) >> 16) & 0xFFFF
+                h = self._hit_btn(x, y)
+                _dbg("面板 WM_LBUTTONUP x=%d y=%d hit=%d" % (x, y, h))
+                if 0 <= h < len(self.actions):
+                    try:
+                        user32.PostMessageW(self.owner, MSG_ACTION_FROM_MENU, h, 0)
+                        _dbg("面板已 post owner msg_action h=%s" % h)
+                    except Exception as e:
+                        _dbg("面板 post 失败 %r" % e)
+                user32.DestroyWindow(hwnd)
+            elif msg == WM_PAINT:
+                self._paint(hwnd)
+                return 0
+            elif msg == WM_KEYDOWN and wparam == 27:
+                user32.DestroyWindow(hwnd)
+            elif msg == WM_CLOSE:
+                user32.DestroyWindow(hwnd)
+            elif msg == WM_KILLFOCUS:
+                user32.DestroyWindow(hwnd)
+            elif msg == WM_DESTROY:
+                _MENU_INSTANCES.pop(int(hwnd), None)
+                for f in (self._hfont, self._hfont_b, self._hfont_s):
+                    try:
+                        if f:
+                            gdi32.DeleteObject(f)
+                    except Exception:
+                        pass
+        except Exception as e:
+            _dbg("面板 _wndproc 异常 msg=0x%04x %r" % (int(msg), e))
+        return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def _paint(self, hwnd):
+        try:
+            ps = _PAINTSTRUCT()
+            hdc = user32.BeginPaint(hwnd, ctypes.byref(ps))
+            if not hdc:
+                return
+            w, h = self._w, self._h
+            m = self.MARGIN
+            # 背景：深色圆角卡 + 1px 边框
+            brush = gdi32.CreateSolidBrush(self.C_BG)
+            pen = gdi32.CreatePen(0, 1, self.C_EDGE)
+            gdi32.SelectObject(hdc, brush)
+            gdi32.SelectObject(hdc, pen)
+            gdi32.RoundRect(hdc, 0, 0, w, h, self.RADIUS * 2, self.RADIUS * 2)
+            gdi32.DeleteObject(brush)
+            gdi32.DeleteObject(pen)
+            gdi32.SetBkMode(hdc, 1)   # TRANSPARENT
+            st = self.spec.get("status", "red")
+            # 状态点 + 状态文字
+            gdi32.SelectObject(hdc, self._hfont)
+            brush = gdi32.CreateSolidBrush(self._DOT.get(st, self._DOT["red"]))
+            gdi32.SelectObject(hdc, brush)
+            gdi32.Ellipse(hdc, m, self._status_y + 6, m + 12, self._status_y + 18)
+            gdi32.DeleteObject(brush)
+            gdi32.SetTextColor(hdc, self._TCLR.get(st, self._TCLR["red"]))
+            st_txt = self._TXT.get(st, "未知")
+            gdi32.TextOutW(hdc, m + 22, self._status_y, st_txt, len(st_txt))
+            # 标题（粗体白）+ 版本（右侧小字）
+            gdi32.SelectObject(hdc, self._hfont_b)
+            gdi32.SetTextColor(hdc, 0xFFFFFF)
+            t = self.spec.get("title", "OpenClaw")
+            gdi32.TextOutW(hdc, m, self._title_y, t, len(t))
+            gdi32.SelectObject(hdc, self._hfont_s)
+            gdi32.SetTextColor(hdc, self.C_KEY)
+            gdi32.SetTextAlign(hdc, TA_RIGHT)
+            v = self.spec.get("version") or ""
+            gdi32.TextOutW(hdc, w - m, self._title_y + 6, v, len(v))
+            gdi32.SetTextAlign(hdc, TA_LEFT)
+            # 两条分隔线
+            pen = gdi32.CreatePen(0, 1, self.C_SEP)
+            gdi32.SelectObject(hdc, pen)
+            gdi32.MoveToEx(hdc, m, self._sep1, None)
+            gdi32.LineTo(hdc, w - m, self._sep1)
+            gdi32.MoveToEx(hdc, m, self._sep2, None)
+            gdi32.LineTo(hdc, w - m, self._sep2)
+            gdi32.DeleteObject(pen)
+            # 键值行
+            gdi32.SelectObject(hdc, self._hfont_s)
+            for (key, val), yy in zip(self.spec.get("rows") or [], self._row_ys):
+                gdi32.SetTextColor(hdc, self.C_KEY)
+                gdi32.TextOutW(hdc, m, yy, key, len(key))
+                gdi32.SetTextColor(hdc, self.C_VAL)
+                gdi32.SetTextAlign(hdc, TA_RIGHT)
+                gdi32.TextOutW(hdc, w - m, yy, val, len(val))
+                gdi32.SetTextAlign(hdc, TA_LEFT)
+            # 按钮
+            gdi32.SelectObject(hdc, self._hfont)
+            for idx, (label, fn) in enumerate(self.actions):
+                x0, y0, x1, y1 = self._btns[idx]
+                if idx == 0:
+                    bg = self.C_PRIMARY_HOVER if idx == self._hover_btn else self.C_PRIMARY
+                    tc = 0xFFFFFF
+                else:
+                    bg = self.C_BTN_HOVER if idx == self._hover_btn else self.C_BTN
+                    tc = 0xDCE0EC
+                brush = gdi32.CreateSolidBrush(bg)
+                pen = gdi32.CreatePen(0, 1, bg)
+                gdi32.SelectObject(hdc, brush)
+                gdi32.SelectObject(hdc, pen)
+                gdi32.RoundRect(hdc, x0, y0, x1, y1, 9, 9)
+                gdi32.DeleteObject(brush)
+                gdi32.DeleteObject(pen)
+                sz = _SIZEX()
+                gdi32.GetTextExtentPoint32W(hdc, label, len(label), ctypes.byref(sz))
+                gdi32.SetTextColor(hdc, tc)
+                gdi32.TextOutW(hdc, (x0 + x1 - sz.cx) // 2,
+                               y0 + (self.BTN_H - sz.cy) // 2, label, len(label))
+            user32.EndPaint(hwnd, ctypes.byref(ps))
+            _dbg("面板 WM_PAINT 完成 btns=%d rows=%d hover=%d"
+                 % (len(self._btns), len(self._row_ys), self._hover_btn))
+        except Exception:
+            try:
+                import traceback as _tb
+                _dbg("面板 _paint 异常:\n%s" % _tb.format_exc())
+            except Exception:
+                pass
+
+    def _thread_show(self):
+        try:
+            if not _menu_reg_class("OcwPanelV1"):
+                return
+            self._calc()
+            self._font()
+            pt = wintypes.POINT()
+            user32.GetCursorPos(ctypes.byref(pt))
+            w, h = self._w, self._h
+            x = max(8, pt.x - w + 8)
+            y = max(8, pt.y - h - 12)
+            hwnd = user32.CreateWindowExW(
+                0x8 | 0x80,   # TOPMOST | TOOLWINDOW（不加 NOACTIVATE——激活后失焦即关）
+                "OcwPanelV1", "OpenClaw", 0x80000000,   # WS_POPUP
+                x, y, w, h, None, None, kernel32.GetModuleHandleW(None), None)
+            if not hwnd:
+                _dbg("面板 CreateWindowExW 失败")
+                return
+            self._hwnd = hwnd
+            _MENU_INSTANCES[int(hwnd)] = self
+            _dbg("面板窗口创建 hwnd=%s btns=%d h=%d" % (int(hwnd), len(self._btns), self._h))
+            user32.ShowWindow(hwnd, 5)   # SW_SHOW（激活）
+            try:
+                user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+            msg = wintypes.MSG()
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+            _dbg("面板消息泵退出")
+        except Exception as e:
+            _dbg("面板线程异常 %r" % e)
+
+    def show(self):
+        """非阻塞弹面板；先关残留面板/菜单（连点右键不叠加）"""
+        for h in list(_MENU_INSTANCES.keys()):
+            try:
+                user32.PostMessageW(h, WM_CLOSE, 0, 0)
+            except Exception:
+                pass
+        import threading as _th
+        _th.Thread(target=self._thread_show, daemon=True).start()
+        return None
+
+
+def open_panel(owner_hwnd, spec, actions):
+    """弹 07 式卡片面板。actions 写入 _MENU_ITEMS（主窗口钩子按索引执行）"""
+    global _MENU_ITEMS
+    _MENU_ITEMS = [(l, f, False) for (l, f) in actions]
+    return AcrylicPanel(owner_hwnd, spec, actions).show()

@@ -58,6 +58,37 @@ def wrb_log(msg):
         pass
 
 # ============================================================
+# 剪贴板（ctypes 直接写 UTF-16，无第三方依赖）——托盘"复制诊断"用
+# ============================================================
+def _clipboard_set(text):
+    """返回是否成功。CF_UNICODETEXT + GMEM_MOVEABLE|ZEROINIT"""
+    try:
+        import ctypes as _c
+        u = _c.windll.user32
+        k = _c.windll.kernel32
+        k.GlobalAlloc.restype = _c.c_void_p
+        k.GlobalLock.restype = _c.c_void_p
+        if not u.OpenClipboard(None):
+            return False
+        try:
+            u.EmptyClipboard()
+            data = (str(text) + "\0").encode("utf-16-le")
+            h = k.GlobalAlloc(0x0042, len(data))
+            if not h:
+                return False
+            p = k.GlobalLock(h)
+            if p:
+                _c.memmove(p, data, len(data))
+                k.GlobalUnlock(h)
+            u.SetClipboardData(13, h)   # CF_UNICODETEXT
+            return True
+        finally:
+            u.CloseClipboard()
+    except Exception:
+        return False
+
+
+# ============================================================
 # 前端 <-> 后端桥接
 # ============================================================
 class Api:
@@ -367,6 +398,30 @@ class Api:
             return q.status == 200
         except Exception:
             return False
+
+    def _model_display(self):
+        """当前激活模型（primary）友好名；未配置返回 '未配置'（只读配置，绝不修改）"""
+        try:
+            cfg = json.load(open(os.path.expanduser("~/.openclaw/openclaw.json"),
+                                 encoding="utf-8"))
+            agents = cfg.get("agents") or {}
+            defaults = agents.get("defaults") or {}
+            primary = (defaults.get("model") or {}).get("primary") or ""
+            if not primary:
+                return "未配置"
+            pid, _, mid = primary.partition("/")
+            label = mid or pid or primary
+            try:
+                provs = (cfg.get("models") or {}).get("providers") or {}
+                for m in (provs.get(pid) or {}).get("models") or []:
+                    if m.get("id") == mid:
+                        label = m.get("name") or label
+                        break
+            except Exception:
+                pass
+            return label or pid or primary
+        except Exception:
+            return "未知"
 
     def _gw_http_ok(self):
         return self._health_ok()
@@ -1553,14 +1608,15 @@ def main():
                 except Exception:
                     pass
             def _fix_gw():
-                api.fix_gateway()
+                try:
+                    api.fix_gateway()
+                except Exception:
+                    pass
             def _reconfig():
                 # 关键：evaluate_js 必须在 pump 线程执行（主窗口 WndProc/消息线程内同步调用会自锁）
                 api._gui_exec(lambda: (
                     win.restore(), win.show(),
                     win.evaluate_js("goConfig('reconfig')")))
-            def _show_menu_gui():
-                api._gui_exec(lambda: (win.restore(), win.show()))
             def _quit():
                 try:
                     global _tray_obj
@@ -1576,6 +1632,75 @@ def main():
                     _tray_obj.update_tip(tip)
                 except Exception:
                     pass
+            def _copy_diag():
+                """复制诊断信息（状态+配置摘要+日志尾部）到剪贴板"""
+                try:
+                    if api._health_ok():
+                        gw_txt = "运行中"
+                    elif api._ping_http():
+                        gw_txt = "启动中（HTTP 未就绪）"
+                    else:
+                        gw_txt = "未运行"
+                    lines = ["=== OpenClaw 工作台 诊断 ===",
+                             "时间: %s" % time.strftime("%Y-%m-%d %H:%M:%S"),
+                             "版本: %s" % (core.get_openclaw_version() or "未安装"),
+                             "网关: %s (端口 %s)" % (gw_txt, api._gateway_port()),
+                             "模型: %s" % api._model_display(),
+                             "日志: %s" % _log_path(),
+                             "--- 日志尾部 30 行 ---"]
+                    try:
+                        with open(_log_path(), encoding="utf-8", errors="replace") as f:
+                            lines += [l.rstrip() for l in list(f.readlines())[-30:]]
+                    except Exception:
+                        lines.append("(无日志)")
+                    if _clipboard_set("\n".join(lines)):
+                        api.push_toast("✅ 诊断信息已复制到剪贴板", True)
+                    else:
+                        api.push_toast("⚠️ 复制失败：剪贴板被占用", False)
+                except Exception as e:
+                    api.push_toast("⚠️ 复制诊断失败: %s" % e, False)
+
+            def _panel_spec():
+                """07 式面板内容：状态三色 + 版本 + 键值行（鼠标离开前抓快照）"""
+                if api._health_ok():
+                    st = "green"
+                elif api._ping_http():
+                    st = "yellow"
+                else:
+                    st = "red"
+                    try:
+                        api._auto_start_gateway()   # 与 get_status 同策略：后台自动恢复（限流）
+                    except Exception:
+                        pass
+                rows = [("监听地址", "127.0.0.1:%s" % api._gateway_port()),
+                        ("当前模型", api._model_display())]
+                return {"status": st, "title": "OpenClaw 工作台",
+                        "version": core.get_openclaw_version() or "未安装",
+                        "rows": rows}
+
+            _tray_obj = None
+            def _panel_route():
+                """右键路由：默认 07 式卡片面板；OCW_PANEL=0 或面板异常 → 系统菜单"""
+                if os.environ.get("OCW_PANEL", "1") != "0":
+                    try:
+                        _tray.open_panel(_hwnd, _panel_spec(), [
+                            ("打开工作台", _show_menu),
+                            ("控制面板", _open_dash),
+                            ("更换模型", _reconfig),
+                            ("修复网关", _fix_gw),
+                            ("复制诊断", _copy_diag),
+                            ("退出", _quit),
+                        ])
+                        return
+                    except Exception as e:
+                        wrb_log("[tray] 面板弹窗异常，回退系统菜单: %r" % e)
+                # 回退系统菜单（临时解绑 _route 防递归）
+                try:
+                    _tray_obj._route = None
+                    _tray_obj.show_menu()
+                finally:
+                    _tray_obj._route = _panel_route
+
             menu = [
                 ("打开工作台", _show_menu),
                 ("打开控制面板", _open_dash),
@@ -1589,6 +1714,7 @@ def main():
                 menu_items=menu)
             if _tray_obj:
                 _tray_obj._sep_after = [2, 4]   # 更换模型后 / 修复网关后分隔
+                _tray_obj._route = _panel_route
             wrb_log("[tray] create_tray ok=%s (挂宿主窗口+WndProc钩子)" % ok)
             if not ok:
                 wrb_log("[tray] 创建失败（Shell_NotifyIconW 返回假）")
