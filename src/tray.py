@@ -760,9 +760,10 @@ class AcrylicPanel:
         i = 0
         while i < len(self.actions):
             kind, label, fn = self.actions[i]
-            if kind in ("main", "quit"):
-                self._btn_rows.append((m, y, self.WIDTH - m, y + self.BTN_H, kind, i))
-                y += self.BTN_H + self.BTN_GAP
+            if kind in ("main", "quit", "row"):
+                hh = self.BTN_H if kind != "row" else 36
+                self._btn_rows.append((m, y, self.WIDTH - m, y + hh, kind, i))
+                y += hh + self.BTN_GAP
                 i += 1
             else:
                 row = [(kind, i)]
@@ -938,6 +939,21 @@ class AcrylicPanel:
             for (x0, y0, x1, y1, kind, ai) in self._btn_rows:
                 label = self.actions[ai][1]
                 hv = self._hover == ai
+                if kind == "row":
+                    bg = self.C_BTN_HOVER if hv else self.C_BTN
+                    self._fill_rect(hdc, x0, y0, x1, y1, bg, 18)
+                    gdi32.SelectObject(hdc, self._hfont)
+                    gdi32.SetTextColor(hdc, 0xF0F1F5)
+                    gdi32.TextOutW(hdc, x0 + 14, y0 + 8, label, len(label))
+                    right = self.spec.get("sessions_right", "") or ""
+                    if right:
+                        gdi32.SelectObject(hdc, self._hfont_s)
+                        gdi32.SetTextColor(hdc, self.C_SUB)
+                        gdi32.TextOutW(hdc, x0 + 18, y0 + 11, right, len(right))
+                    gdi32.SetTextColor(hdc, self.C_SUB)
+                    gdi32.SelectObject(hdc, self._hfont)
+                    gdi32.TextOutW(hdc, x1 - 26, y0 + 8, ">", 1)
+                    continue
                 if kind == "main":
                     bg = self.C_MAIN_HOVER if hv else self.C_MAIN
                     tc = 0xFFFFFF
@@ -1006,8 +1022,285 @@ class AcrylicPanel:
         return None
 
 
+def open_session_panel(owner_hwnd, spec, actions):
+    """会话列表面板：spec={"title","list"} + actions（点击走 MSG_ACTION 链同 open_panel）"""
+    global _MENU_ITEMS
+    _MENU_ITEMS = [(l, f, False) for (_k, l, f) in actions]
+    return AcrylicSessionList(owner_hwnd, spec, actions).show()
+
+
 def open_panel(owner_hwnd, spec, actions):
     """弹 07 式卡片面板。actions=[(kind,label,fn)]，写入 _MENU_ITEMS（主窗口钩子按索引执行）"""
     global _MENU_ITEMS
     _MENU_ITEMS = [(l, f, False) for (_k, l, f) in actions]
     return AcrylicPanel(owner_hwnd, spec, actions).show()
+
+
+class AcrylicSessionList:
+    """会话列表面板（07 式左图）：标题+时间 / 模型+token 数 / 上下文进度条（>80% 黄 >95% 红）
+    spec = {"title", "list":[{label,age,model,total,ctx,pct,tokens_text}]}
+    actions = [("main","返回",fn), ("row","会话标题",fn), ("btn","打开官方会话页",fn)]
+    行高 64：标题/时间一行、模型/tokens 一行、进度条一行"""
+    WIDTH = 360
+    MARGIN = 16
+    RADIUS = 14
+    ROW_H = 64
+    BTN_H = 38
+    BTN_GAP = 8
+
+    C_BG = 0x1C1615
+    C_EDGE = 0x362C2A
+    C_TXT = 0xF6F2F2
+    C_SUB = 0xA89C9A
+    C_WEAK = 0x6F6563
+    C_SEP = 0x2E2523
+    C_ROWHOVER = 0x242124
+    C_BAR_BG = 0x33312F
+    C_BAR_G = 0x37A462
+    C_BAR_Y = 0xB0813C
+    C_BAR_R = 0xB05243
+    C_BTN = 0x2B2220
+    C_BTN_HOVER = 0x3A2E2C
+
+    def __init__(self, owner_hwnd, spec, actions):
+        self.owner = int(owner_hwnd)
+        self.spec = spec
+        self.actions = actions
+        self._hwnd = None
+        self._hover = -1
+        self._rows = []          # [(x0,y0,x1,y1,kind,ai)]
+        self._w = self.WIDTH
+        self._h = 0
+        self._hdr_y = 0
+        self._sep1 = 0
+        self._hfont = None
+        self._hfont_b = None
+        self._hfont_s = None
+
+    def _calc(self):
+        m = self.MARGIN
+        y = m
+        self._hdr_y = y; y += 30
+        self._sep1 = y - 2; y += 11
+        self._rows = []
+        i = 0
+        while i < len(self.actions):
+            kind, label, fn = self.actions[i]
+            if kind == "main":
+                self._rows.append((m, y, self.WIDTH - m, y + self.BTN_H, kind, i))
+                y += self.BTN_H + self.BTN_GAP
+                i += 1
+            elif kind == "row":
+                self._rows.append((m, y, self.WIDTH - m, y + self.ROW_H, kind, i))
+                y += self.ROW_H + 4
+                i += 1
+            elif kind == "btn":
+                half = int((self.WIDTH - 2 * m - self.BTN_GAP) / 2)
+                self._rows.append((m, y, m + half, y + self.BTN_H, "btn", i))
+                self._rows.append((m + half + self.BTN_GAP, y, self.WIDTH - m,
+                                   y + self.BTN_H, "btn", i))
+                y += self.BTN_H + self.BTN_GAP
+                i += 1
+        self._h = y + 16
+
+    def _font(self):
+        self._hfont = gdi32.CreateFontW(-13, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0,
+                                        "Microsoft YaHei UI")
+        self._hfont_b = gdi32.CreateFontW(-15, 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 0, 0,
+                                          "Microsoft YaHei UI")
+        self._hfont_s = gdi32.CreateFontW(-11, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0,
+                                          "Microsoft YaHei UI")
+
+    def _hit(self, x, y):
+        for (x0, y0, x1, y1, kind, ai) in self._rows:
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return ai
+        return -1
+
+    def _wndproc(self, hwnd, msg, wparam, lparam):
+        try:
+            if msg == WM_MOUSEMOVE:
+                x, y = int(lparam) & 0xFFFF, (int(lparam) >> 16) & 0xFFFF
+                h = self._hit(x, y)
+                if h != self._hover:
+                    self._hover = h
+                    user32.InvalidateRect(hwnd, None, True)
+            elif msg == WM_LBUTTONUP:
+                x, y = int(lparam) & 0xFFFF, (int(lparam) >> 16) & 0xFFFF
+                h = self._hit(x, y)
+                _dbg("会话栏 WM_LBUTTONUP x=%d y=%d hit=%d" % (x, y, h))
+                if 0 <= h < len(self.actions):
+                    try:
+                        user32.PostMessageW(self.owner, MSG_ACTION_FROM_MENU, h, 0)
+                        _dbg("会话栏已 post owner msg_action h=%s" % h)
+                    except Exception as e:
+                        _dbg("会话栏 post 失败 %r" % e)
+                user32.DestroyWindow(hwnd)
+            elif msg == WM_PAINT:
+                self._paint(hwnd)
+                return 0
+            elif msg == WM_KEYDOWN and wparam == 27:
+                user32.DestroyWindow(hwnd)
+            elif msg == WM_CLOSE:
+                user32.DestroyWindow(hwnd)
+            elif msg == WM_KILLFOCUS:
+                user32.DestroyWindow(hwnd)
+            elif msg == WM_DESTROY:
+                _MENU_INSTANCES.pop(int(hwnd), None)
+                for f in (self._hfont, self._hfont_b, self._hfont_s):
+                    try:
+                        if f:
+                            gdi32.DeleteObject(f)
+                    except Exception:
+                        pass
+        except Exception as e:
+            _dbg("会话栏 _wndproc 异常 msg=0x%04x %r" % (int(msg), e))
+        return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def _paint(self, hwnd):
+        try:
+            ps = _PAINTSTRUCT()
+            hdc = user32.BeginPaint(hwnd, ctypes.byref(ps))
+            if not hdc:
+                return
+            w, h = self._w, self._h
+            m = self.MARGIN
+            gdi32.SetBkMode(hdc, 1)
+            brush = gdi32.CreateSolidBrush(self.C_BG)
+            pen = gdi32.CreatePen(0, 1, self.C_EDGE)
+            gdi32.SelectObject(hdc, brush)
+            gdi32.SelectObject(hdc, pen)
+            gdi32.RoundRect(hdc, 0, 0, w, h, self.RADIUS * 2, self.RADIUS * 2)
+            gdi32.DeleteObject(brush)
+            gdi32.DeleteObject(pen)
+            lst = self.spec.get("list") or []
+            # 头部：标题 + 计数
+            gdi32.SelectObject(hdc, self._hfont_b)
+            gdi32.SetTextColor(hdc, self.C_TXT)
+            t = "%s (%d)" % (self.spec.get("title", "Sessions"), len(lst))
+            gdi32.TextOutW(hdc, m, self._hdr_y, t, len(t))
+            gdi32.SelectObject(hdc, self._hfont_s)
+            gdi32.SetTextColor(hdc, self.C_WEAK)
+            gdi32.SetTextAlign(hdc, TA_RIGHT)
+            gdi32.TextOutW(hdc, w - m, self._hdr_y + 6, "点会话打开", len("点会话打开"))
+            gdi32.SetTextAlign(hdc, TA_LEFT)
+            # 分隔线
+            pen = gdi32.CreatePen(0, 1, self.C_SEP)
+            gdi32.SelectObject(hdc, pen)
+            gdi32.MoveToEx(hdc, m, self._sep1, None)
+            gdi32.LineTo(hdc, w - m, self._sep1)
+            gdi32.DeleteObject(pen)
+            # 列表项：row 三线（标题/时间、模型/tokens、进度条）
+            row_i = 0
+            for (x0, y0, x1, y1, kind, ai) in self._rows:
+                if kind == "row":
+                    d = lst[row_i] if row_i < len(lst) else {}
+                    row_i += 1
+                    if self._hover == ai:
+                        brush = gdi32.CreateSolidBrush(self.C_ROWHOVER)
+                        gdi32.SelectObject(hdc, brush)
+                        gdi32.RoundRect(hdc, x0, y0, x1, y1, 10, 10)
+                        gdi32.DeleteObject(brush)
+                    gdi32.SelectObject(hdc, self._hfont)
+                    gdi32.SetTextColor(hdc, self.C_TXT)
+                    lb = d.get("label") or "未命名会话"
+                    gdi32.TextOutW(hdc, x0 + 12, y0 + 14, lb, len(lb))
+                    gdi32.SelectObject(hdc, self._hfont_s)
+                    gdi32.SetTextColor(hdc, self.C_WEAK)
+                    aged = d.get("age") or ""
+                    gdi32.SetTextAlign(hdc, TA_RIGHT)
+                    gdi32.TextOutW(hdc, x1 - 12, y0 + 15, aged, len(aged))
+                    gdi32.SetTextAlign(hdc, TA_LEFT)
+                    gdi32.SetTextColor(hdc, self.C_SUB)
+                    md = d.get("model") or ""
+                    gdi32.TextOutW(hdc, x0 + 12, y0 + 34, md, len(md))
+                    tkx = d.get("tokens_text") or ""
+                    gdi32.SetTextColor(hdc, self.C_TXT)
+                    gdi32.SetTextAlign(hdc, TA_RIGHT)
+                    gdi32.TextOutW(hdc, x1 - 12, y0 + 34, tkx, len(tkx))
+                    gdi32.SetTextAlign(hdc, TA_LEFT)
+                    # 上下文进度条
+                    bx0, bx1 = x0 + 12, x1 - 12
+                    by = y0 + 54
+                    brush = gdi32.CreateSolidBrush(self.C_BAR_BG)
+                    gdi32.SelectObject(hdc, brush)
+                    gdi32.RoundRect(hdc, bx0, by, bx1, by + 5, 4, 4)
+                    gdi32.DeleteObject(brush)
+                    pct = float(d.get("pct") or 0.0)
+                    if pct > 0:
+                        fill = int((bx1 - bx0) * min(pct, 1.0))
+                        if pct >= 0.95:
+                            cbar = self.C_BAR_R
+                        elif pct >= 0.80:
+                            cbar = self.C_BAR_Y
+                        else:
+                            cbar = self.C_BAR_G
+                        brush = gdi32.CreateSolidBrush(cbar)
+                        gdi32.SelectObject(hdc, brush)
+                        gdi32.RoundRect(hdc, bx0, by, bx0 + fill, by + 5, 4, 4)
+                        gdi32.DeleteObject(brush)
+                else:
+                    label = self.actions[ai][1]
+                    hv = self._hover == ai
+                    bg = self.C_BTN_HOVER if hv else self.C_BTN
+                    brush = gdi32.CreateSolidBrush(bg)
+                    gdi32.SelectObject(hdc, brush)
+                    gdi32.RoundRect(hdc, x0, y0, x1, y1, 18, 18)
+                    gdi32.DeleteObject(brush)
+                    gdi32.SelectObject(hdc, self._hfont)
+                    gdi32.SetTextColor(hdc, 0xD0D2DA)
+                    sz = _SIZEX()
+                    gdi32.GetTextExtentPoint32W(hdc, label, len(label), ctypes.byref(sz))
+                    gdi32.TextOutW(hdc, (x0 + x1 - sz.cx) // 2,
+                                   y0 + (y1 - y0 - sz.cy) // 2, label, len(label))
+            user32.EndPaint(hwnd, ctypes.byref(ps))
+            _dbg("会话栏 WM_PAINT 完成 rows=%d items=%d" % (len(self._rows), len(lst)))
+        except Exception:
+            try:
+                import traceback as _tb
+                _dbg("会话栏 _paint 异常:\n%s" % _tb.format_exc())
+            except Exception:
+                pass
+
+    def _thread_show(self):
+        try:
+            if not _menu_reg_class("OcwPanelV2"):
+                return
+            self._calc()
+            self._font()
+            pt = wintypes.POINT()
+            user32.GetCursorPos(ctypes.byref(pt))
+            w, h = self._w, self._h
+            x = max(8, pt.x - w + 8)
+            y = max(8, pt.y - h - 12)
+            hwnd = user32.CreateWindowExW(
+                0x8 | 0x80, "OcwPanelV2", "OpenClaw", 0x80000000,
+                x, y, w, h, None, None, kernel32.GetModuleHandleW(None), None)
+            if not hwnd:
+                _dbg("会话栏 CreateWindowExW 失败")
+                return
+            self._hwnd = hwnd
+            _MENU_INSTANCES[int(hwnd)] = self
+            _dbg("会话栏创建 hwnd=%s rows=%d h=%d" % (int(hwnd), len(self._rows), self._h))
+            user32.ShowWindow(hwnd, 5)
+            try:
+                user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+            msg = wintypes.MSG()
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+            _dbg("会话栏消息泵退出")
+        except Exception as e:
+            _dbg("会话栏线程异常 %r" % e)
+
+    def show(self):
+        for h in list(_MENU_INSTANCES.keys()):
+            try:
+                user32.PostMessageW(h, WM_CLOSE, 0, 0)
+            except Exception:
+                pass
+        import threading as _th
+        _th.Thread(target=self._thread_show, daemon=True).start()
+        return None

@@ -490,6 +490,30 @@ class Api:
             self.push_toast("⚠️ 控制面板打开失败: %s" % e, False)
             return False
 
+    def open_session(self, key):
+        """打开指定会话的官方控制页 /chat?session=<key>#token=（后台线程，evaluate_js 不落 WndProc）"""
+        def run():
+            try:
+                url = "http://127.0.0.1:%s/chat?session=%s" % (
+                    self._gateway_port(),
+                    urllib.request.quote(key, safe="") if hasattr(urllib.request, "quote")
+                    else key.replace(":", "%3A").replace("@", "%40"))
+                try:
+                    cfg = json.load(open(os.path.expanduser("~/.openclaw/openclaw.json"),
+                                         encoding="utf-8"))
+                    tok = (cfg.get("gateway") or {}).get("auth", {}).get("token", "")
+                    if tok:
+                        import urllib.parse as _up
+                        url += "#token=" + _up.quote(tok)
+                except Exception:
+                    pass
+                self.push_log("  打开会话: %s" % url.split("#")[0].rsplit("session=", 1)[-1][:40])
+                self._open_dashboard_window(url)
+                self.push_done("launch", True, None)
+            except Exception as e:
+                self.push_log("  打开会话失败: %s" % e)
+        threading.Thread(target=run, daemon=True).start()
+
     def close_panel(self):
         """关闭仪表盘面板窗口"""
         if self._panel_win is not None:
@@ -1601,6 +1625,100 @@ def main():
                     _tray_obj.update_tip(tip)
                 except Exception:
                     pass
+            _sessions_cache = {"t": 0.0, "data": None, "loading": False}
+
+            def _session_label(key):
+                """会话 key → 中文标签（主会话/微信/QQ/定时/仪表盘/截断）"""
+                label = key.split(":")
+                if len(label) >= 2 and label[-1] == "main" and "main" in label:
+                    return "主会话"
+                for p in label:
+                    if p in ("openclaw-weixin", "weixin", "wechat", "im-bot"):
+                        return "微信"
+                    if p == "qqbot":
+                        return "QQ"
+                    if p == "cron":
+                        return "定时任务"
+                    if p == "dashboard":
+                        return "仪表盘"
+                tail = key.split("@")[0].replace("direct:", "").replace("default:", "")
+                tail = tail.strip(":").split(":")[-1][:14]
+                return tail or "会话"
+
+            def _hz(n):
+                """token 数人类化：25456 → 25.5K"""
+                if n is None:
+                    return "?"
+                n = float(n)
+                if n >= 1e6:
+                    return "%.1fM" % (n / 1e6)
+                if n >= 1e3:
+                    return "%.1fK" % (n / 1e3)
+                return str(int(n))
+
+            def _normalize_sessions(raw):
+                """CLI sessions --json → 面板行数据（按更新时间倒序）"""
+                out = []
+                for s in raw:
+                    try:
+                        total = s.get("totalTokens") or 0
+                        ctx = s.get("contextTokens") or 0
+                        pct = (total / ctx) if ctx else 0.0
+                        age = s.get("ageMs") or 0
+                        if age < 3600e3:
+                            age_t = "%d分钟前" % max(1, int(age / 60000))
+                        elif age < 86400e3:
+                            age_t = "%d小时前" % int(age / 3600e3)
+                        else:
+                            age_t = "%d天前" % int(age / 86400e3)
+                        out.append({
+                            "label": _session_label(s.get("key") or ""),
+                            "age": age_t,
+                            "model": s.get("model") or "",
+                            "tokens_text": "%s/%s (%d%%)" % (_hz(total), _hz(ctx or 1), round(pct * 100)),
+                            "pct": pct,
+                            "active": bool((s.get("status") or "").lower() in
+                                           ("active", "running", "working")) or False,
+                            "key": s.get("key") or "",
+                            "total": total, "ctx": ctx,
+                        })
+                    except Exception:
+                        continue
+                return out
+
+            def _load_sessions(force=False):
+                """CLI 读会话（60s 缓存；后台加载不阻塞）；返回 normalized list 或 None"""
+                now = time.time()
+                if not force and _sessions_cache["data"] is not None and now - _sessions_cache["t"] < 60:
+                    return _sessions_cache["data"]
+                if _sessions_cache["loading"]:
+                    return _sessions_cache["data"]
+                _sessions_cache["loading"] = True
+                def run():
+                    try:
+                        r = core._run_quiet(claw_cmd() + " --no-color sessions --active 1440 --limit 30 --json",
+                                            timeout=60)
+                        if r and r.returncode == 0 and r.stdout:
+                            j = json.loads(r.stdout)
+                            _sessions_cache["data"] = _normalize_sessions(j.get("sessions") or [])
+                            _sessions_cache["t"] = time.time()
+                    except Exception:
+                        pass
+                    finally:
+                        _sessions_cache["loading"] = False
+                threading.Thread(target=run, daemon=True).start()
+                return _sessions_cache["data"]
+
+            def _sessions_summary():
+                """面板 Sessions 行右侧摘要：数量 + 总 token"""
+                data = _load_sessions()
+                if data:
+                    total = sum(int(d.get("total") or 0) for d in data)
+                    act = sum(1 for d in data if d.get("active"))
+                    return "%d 个 · %s token%s" % (len(data), _hz(total),
+                                                   " · 活动" if act else "")
+                return "正在加载…"
+
             def _panel_spec():
                 """07 式面板内容：状态三色 + 版本 + 地址/模型 + Gateway 卡（打开时抓快照）"""
                 if api._health_ok():
@@ -1618,14 +1736,36 @@ def main():
                         "status": st, "status_text": stt,
                         "addr": "127.0.0.1:%s" % api._gateway_port(),
                         "model": api._model_display(),
-                        "badge": "Local", "node": "本机 1 节点"}
+                        "badge": "Local", "node": "本机 1 节点",
+                        "sessions_right": _sessions_summary()}
 
             _tray_obj = None
+            def _open_sessions_panel():
+                """打开会话列表面板：行=会话（点开对应官方页），头部返回主面板"""
+                try:
+                    data = _load_sessions(force=True) or []
+                    actions = [("main", "返回工作台", _panel_route)]
+                    def _mk(key, label):
+                        def fn():
+                            try:
+                                api.open_session(key)
+                            except Exception:
+                                pass
+                        return fn
+                    for d in data[:7]:
+                        actions.append(("row", d.get("label") or "会话", _mk(d.get("key"), d)))
+                    actions.append(("btn", "打开官方会话页", _open_dash))
+                    _tray.open_session_panel(_hwnd, {"title": "Sessions", "list": data}, actions)
+                except Exception as e:
+                    wrb_log("[tray] 会话面板异常，回退: %r" % e)
+                    _panel_route()
+
             def _panel_route():
                 """右键路由：默认 07 式卡片面板；OCW_PANEL=0 或面板异常 → 系统菜单"""
                 if os.environ.get("OCW_PANEL", "1") != "0":
                     try:
                         _tray.open_panel(_hwnd, _panel_spec(), [
+                            ("row", "Sessions", _open_sessions_panel),
                             ("main", "打开工作台", _show_menu),
                             ("btn", "控制面板", _open_dash),
                             ("btn", "重新配置", _reconfig),

@@ -63,14 +63,21 @@
 - [x] 按钮组：打开工作台（主色通栏）/ 控制面板 / 重新配置 / 修复网关 / 退出
 - [x] 删除「复制诊断」（用户要求不出现在面板）；新配色直接照原版截图
 
-### ⏳ 待办：面板剩余功能（记自 07 原版截图/红圈，数据源未定）
-- [ ] **会话/用量统计行**（"1/1 node · 11 sessions · $13.84"、Sessions/Usage 子行）——官方 UI 无 REST API（JS 仅 ws://127.0.0.1:18789），数据需走 WebSocket 协议；参考 07 的 `TrayMenuRenderer.cs` + `OpenClaw.Connection` 实现（C#，已 clone）
-- [ ] **进度条**（ctx 占用，>80% 黄 >95% 红）——同 WS 数据源
-- [ ] **权限开关**（Permissions 直接开关能力）——需网关能力清单接口
-- [ ] 卡片 hover 悬浮层（版本/在线客户端/待审批计数）——07 GatewayCard 的展开细节
-- [ ] 面板实时刷新（Updated 2s ago）——现在每次右键重新抓快照
-- [ ] 菜单入口项：Dashboard/Chat/Canvas/Diagnostics（差异化：我们的"打开工作台/控制面板"已覆盖核心，Chat/Canvas 待官方页面可用性确认）
-- [ ] Toggle 状态即时反馈（现在点开关后需重新右键看状态；面板关闭时用 toast 过渡）
+### ⏳ 待办：面板剩余功能（记自 07 原版截图/红圈）
+- [x] **会话列表栏**（09-01 完成）：`openclaw sessions --json` 数据源（实测字段 totalTokens/contextTokens/model/ageMs）；会话列表面板（标题+时间/模型+token/上下文进度条 >80%黄 >95%红），点击行打开对应会话官方页；主面板 Sessions 行入口+摘要
+- [x] **上下文进度条**（同上实现；主会话那条也走 CLI 数据）
+- [ ] 面板实时刷新（Updated 2s ago）——现在每次右键重新抓快照；可后续靠 15s tip 轮询线程带出
+- [ ] Usage 成本行（$13.84 · 304.1M tokens）——WS `usage.cost`/`usage.status` 才有（需要 connect 签名：07 的 DeviceIdentity 体系）；CLI 侧无等价命令 → 成本行后置
+- [ ] **权限开关**（Permissions 直接开关能力）——需网关能力清单接口；07 `perm-toggle|*` 参考
+- [ ] 卡片 hover 悬浮层（版本/在线客户端/待审批计数）——07 GatewayCard 展开细节
+- [ ] WS 实时推送（可选）：07 用 connect.challenge+device 签名（C# DeviceIdentityConnectEnvelopeSigner）；本地 SDK 需复刻签名算法——价值比 CLI 轮询低，暂不做
+- [ ] 菜单入口项：Chat/Canvas（官方页可用性确认后加直达按钮）
+
+### 研究结论（WS 协议，留档）
+- 网关 WS：ws://127.0.0.1:<port>/ → connect.challenge(nonce/ts) → connect(params: role/auth.token/client/minProtocol:4/maxProtocol:4)
+- 服务器对纯 token 连接的拒绝原因未完全确认（可能要求 device identity——枚举见 AUTH_*_MISMATCH）
+- sessions.list / usage / usage.cost / sessions.patch / sessions.delete 等 RPC 方法；payload tryGetProperty("sessions")
+- **最终决定：CLI 方案（--json）代替 WS**——免签名、稳定、本机实测 2-3s
 
 ### ⏳ Node 路线（用户已拍板维持现状，记录备选）
 - [ ] 备选 1：打包期抠 node.exe（93MB）进包（01 的 download-node.ts 做法），openclaw 走 npmmirror 在线装（1-3 分钟）
