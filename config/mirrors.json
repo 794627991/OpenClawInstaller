@@ -1,0 +1,56 @@
+{
+  "mirrors": {
+    "npm": "https://registry.npmmirror.com",
+    "node": "https://npmmirror.com/mirrors/node",
+    "openclaw": "https://registry.npmmirror.com"
+  },
+  "node_versions": {
+    "recommended": "24.15.0",
+    "supported": ["22.22.3", "24.15.0", "25.9.0"],
+    "unsupported": ["23.x"]
+  },
+  "providers": [
+    {
+      "id": "opencode-go",
+      "name": "OpenCode Go（推荐，有免费额度）",
+      "description": "OpenCode Go 提供多种模型，注册即用",
+      "key_url": "https://opencode.ai",
+      "key_placeholder": "sk-..."
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "description": "需要 OpenAI API Key",
+      "key_url": "https://platform.openai.com",
+      "key_placeholder": "sk-..."
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic (Claude)",
+      "description": "需要 Anthropic API Key",
+      "key_url": "https://console.anthropic.com",
+      "key_placeholder": "sk-ant-..."
+    },
+    {
+      "id": "google",
+      "name": "Google Gemini",
+      "description": "需要 Google AI API Key",
+      "key_url": "https://aistudio.google.com",
+      "key_placeholder": "AI..."
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "description": "国产模型，价格便宜",
+      "key_url": "https://platform.deepseek.com",
+      "key_placeholder": "sk-..."
+    },
+    {
+      "id": "zai",
+      "name": "Z.AI (GLM)",
+      "description": "智谱 AI，国产模型",
+      "key_url": "https://open.bigmodel.cn",
+      "key_placeholder": "..."
+    }
+  ]
+}

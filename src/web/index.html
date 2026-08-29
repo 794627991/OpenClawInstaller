@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🦞 OpenClaw 一键安装器</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="bg-glow"></div>
+<div class="trail" id="trail">
+  <div class="trail-dot t1" data-speed="0.06" data-scale="1"></div>
+  <div class="trail-dot t2" data-speed="0.10" data-scale="0.9"></div>
+  <div class="trail-dot t3" data-speed="0.16" data-scale="0.7"></div>
+</div>
+
+<!-- ============ 启动器首页（未安装态） ============ -->
+<section class="page" id="page-home">
+  <div class="hero">
+    <div class="hero-emoji" id="hero-logo"><img src="icon.png" alt="🦞"></div>
+    <h1>OpenClaw 工作台</h1>
+    <div class="hero-ver">OpenClaw 一键安装 &amp; 启动中心&nbsp;·&nbsp;<span id="ver">v1.2.0</span></div>
+  </div>
+
+  <!-- 未安装 -->
+  <div id="home-install" style="display:flex;flex-direction:column;align-items:center;width:100%;">
+    <div class="card">
+      <div class="card-title">安装步骤</div>
+      <div class="step-row"><span class="step-num">1</span>检测并安装 Node.js 运行环境</div>
+      <div class="step-row"><span class="step-num">2</span>安装 OpenClaw 主程序（默认 D 盘）</div>
+      <div class="step-row"><span class="step-num">3</span>选择 AI 服务商 + 填入 API Key（必需）</div>
+      <div class="step-row"><span class="step-num">4</span>自动配置 Gateway 服务 + 安装技能</div>
+    </div>
+    <div class="card-hint">⏱️ 全程约 3-5 分钟 &nbsp;|&nbsp; 🖱️ 只需点击几下 &nbsp;|&nbsp; 🇨🇳 国内镜像加速</div>
+    <button class="btn-primary" id="btn-start">开始检测环境 <span class="btn-icon">→</span></button>
+  </div>
+
+  <!-- 已安装 -->
+  <div id="home-usage" style="display:none;flex-direction:column;align-items:center;width:100%;">
+    <div class="card" style="max-width:520px;">
+      <div class="status-row"><span class="s-label"><span class="icon" data-icon="lobster"></span>OpenClaw</span><span class="status-val ok" id="st-version">检测中…</span></div>
+      <div class="status-row"><span class="s-label"><span class="icon" data-icon="globe"></span>Gateway 服务</span><span class="status-val" id="st-gateway">检测中…</span></div>
+      <div class="status-row"><span class="s-label"><span class="icon" data-icon="chip"></span>AI 模型</span><span class="status-val" id="st-model">检测中…</span></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px;width:100%;max-width:520px;">
+      <button class="btn-primary" id="btn-use" style="margin-top:0;"><span class="btn-icon"><span class="icon" data-icon="play"></span></span> 马上开始使用</button>
+      <div style="display:flex;gap:10px;">
+        <button class="btn-secondary" id="btn-fix" style="flex:1;"><span class="btn-icon"><span class="icon" data-icon="wrench"></span></span> 修复 Gateway</button>
+        <button class="btn-secondary" id="btn-reconfig" style="flex:1;"><span class="btn-icon"><span class="icon" data-icon="key"></span></span> 更换 AI 模型</button>
+      </div>
+    </div>
+    <a class="link-plain" id="btn-reinstall" style="margin-top:16px;cursor:pointer;"><span class="btn-icon"><span class="icon" data-icon="refresh"></span></span> 重新安装（覆盖/升级）</a>
+  </div>
+</section>
+
+<!-- ============ 环境检测页 ============ -->
+<section class="page" id="page-env" style="display:none">
+  <h2>环境检测</h2>
+  <p class="sub">检测中，请稍候…</p>
+  <div class="card env-list" id="env-list">
+    <div class="env-item" data-key="network"><span class="s-label"><span class="icon" data-icon="globe"></span>网络连接</span><span class="env-status">检测中…</span></div>
+    <div class="env-item" data-key="node"><span class="s-label"><span class="icon" data-icon="box"></span>Node.js</span><span class="env-status">检测中…</span></div>
+    <div class="env-item" data-key="npm"><span class="s-label"><span class="icon" data-icon="code"></span>npm</span><span class="env-status">检测中…</span></div>
+    <div class="env-item" data-key="openclaw"><span class="s-label"><span class="icon" data-icon="lobster"></span>OpenClaw</span><span class="env-status">检测中…</span></div>
+  </div>
+  <div class="card-hint">未安装的组件将自动安装，无需手动操作</div>
+  <button class="btn-primary" id="btn-env-next" disabled>下一步 <span class="btn-icon">→</span></button>
+</section>
+
+<!-- ============ 安装位置页 ============ -->
+<section class="page" id="page-dir" style="display:none">
+  <h2>安装位置</h2>
+  <p class="sub">默认安装到 D 盘（避免占用 C 盘空间），可自行修改</p>
+  <div class="card">
+    <div class="dir-row">
+      <input type="text" id="dir-input" spellcheck="false">
+      <button class="btn-secondary" id="btn-browse">浏览…</button>
+    </div>
+    <div class="space-row" id="space-row">
+      <span class="space-chip" id="space-c">C 盘：检测中…</span>
+      <span class="space-chip" id="space-d">D 盘：检测中…</span>
+    </div>
+  </div>
+  <div class="card">
+    <div class="dir-info"><span class="icon" data-icon="box"></span><b>Node.js：</b><span>自动检测，缺失时自动安装（C 盘）</span></div>
+    <div class="dir-info"><span class="icon" data-icon="lobster"></span><b>OpenClaw 主程序：</b><span>安装到上方目录，自动写入环境变量</span></div>
+    <div class="dir-info"><span class="icon" data-icon="folder"></span><b>数据/配置文件：</b><span id="dir-data"></span></div>
+  </div>
+  <div class="card-hint">保持默认即可，直接点击「开始安装」</div>
+  <button class="btn-primary" id="btn-install-go">开始安装 <span class="btn-icon">→</span></button>
+</section>
+
+<!-- ============ 安装进度页 ============ -->
+<section class="page" id="page-install" style="display:none">
+  <h2>正在安装</h2>
+  <div class="progress-wrap">
+    <div class="progress-bar" id="progress-bar"></div>
+  </div>
+  <div class="progress-label" id="progress-label">准备中…</div>
+  <div class="log-box" id="log-box"></div>
+</section>
+
+<!-- ============ 配置页（单列流式，小窗口友好） ============ -->
+<section class="page" id="page-config" style="display:none">
+  <button class="btn-secondary btn-sm config-top-back" id="btn-config-back" style="display:none;">← 返回工作台</button>
+  <h2>配置 AI 模型</h2>
+  <p class="sub">跟着指示获取 Key → 填入下方 → 验证后继续</p>
+  <div class="config-body">
+    <!-- 左栏：获取 API Key 指引（首要信息，小白先看） -->
+    <div class="config-left">
+      <div class="card guide-card">
+        <div class="guide-title" id="guide-title">📖 如何获取 API Key</div>
+        <a class="guide-url" id="guide-url">请先选择一个服务商</a>
+        <div class="guide-steps" id="guide-steps"></div>
+      </div>
+    </div>
+    <!-- 右栏：操作区 -->
+    <div class="config-right">
+      <div class="card" id="model-card" style="display:none;">
+        <div class="card-title">我的 AI 模型：</div>
+        <select id="model-select" class="model-select"></select>
+        <div class="model-hint">选择后自动切换激活，当前使用：<span id="model-current"></span></div>
+        <a class="link-plain" id="btn-manage-models" style="margin-top:10px;display:inline-block;cursor:pointer;">＋ 管理模型（添加 / 移除）</a>
+        <div id="manage-models" style="display:none;margin-top:10px;">
+          <select id="manage-provider" class="model-select"></select>
+          <div id="manage-list" style="margin-top:8px;max-height:180px;overflow-y:auto;"></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">选择服务商：</div>
+        <input type="text" class="search-input" id="provider-search"
+               placeholder="输入关键词搜索服务商（如：deep、claude、kimi）">
+        <div class="provider-list" id="provider-list"></div>
+      </div>
+      <div class="card" id="key-card">
+        <div class="card-title">填入 API Key：</div>
+        <div class="key-row">
+          <input type="password" id="key-input" class="key-input" placeholder="sk-...">
+          <button class="btn-secondary btn-sm" id="btn-toggle-key"><span class="btn-icon"><span class="icon" data-icon="eye"></span></span> 显示</button>
+        </div>
+        <div class="key-format" id="key-format"></div>
+        <div class="verify-row">
+          <button class="btn-secondary btn-sm" id="btn-verify"><span class="btn-icon"><span class="icon" data-icon="check"></span></span> 验证 Key</button>
+          <div class="verify-result" id="verify-result"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="config-actions">
+    <button class="btn-primary" id="btn-config-next" style="margin-top:0;">下一步 <span class="btn-icon">→</span></button>
+  </div>
+</section>
+
+<!-- ============ 轻提示 ============ -->
+<div id="toast" style="display:none;"></div>
+
+<!-- ============ 调试日志弹层 ============ -->
+<div id="log-modal">
+  <div class="log-modal-box">
+    <div class="log-modal-head">🛠 调试日志 <span class="log-modal-close" id="log-close">✕</span></div>
+    <div class="log-modal-body" id="log-content">加载中…</div>
+    <div class="log-modal-foot">
+      <button class="btn-secondary btn-sm" id="log-refresh">🔄 刷新</button>
+      <button class="btn-secondary btn-sm" id="log-copy">📋 复制</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 主题切换（配色 × 风格） ============ -->
+<button id="theme-btn" title="切换主题">🎨</button>
+<button id="log-btn" title="调试日志">🛠</button>
+<div id="theme-panel" style="display:none;">
+  <div class="theme-title">🎨 配色 <span style="color:var(--text-dim);font-weight:400">11 套</span> × ✨ 风格 <span style="color:var(--text-dim);font-weight:400">11 种</span> <span id="theme-close">✕</span></div>
+  <div class="theme-sec">🎨 配色</div>
+  <div id="theme-grid"></div>
+  <div class="theme-sec">✨ 风格</div>
+  <div id="style-grid"></div>
+</div>
+
+<script src="icons.js"></script>
+<script src="themes.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
