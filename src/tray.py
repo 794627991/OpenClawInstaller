@@ -228,9 +228,8 @@ class TrayIcon:
                 for idx, (label, fn) in enumerate(self.menu_items):
                     sep = idx in getattr(self, "_sep_after", [])
                     items.append((label, fn, sep))
-                fn = AcrylicMenu(self.hwnd, items).show()
-                if fn is not None:
-                    fn()
+                # 非阻塞：菜单在子线程弹，点击动作在子线程直接执行
+                AcrylicMenu(self.hwnd, items).show()
                 return
             except Exception:
                 pass
@@ -412,6 +411,13 @@ class AcrylicMenu:
             h = self._hit(y)
             if 0 <= h < len(self.items):
                 self._result = self.items[h][1]
+                fn = self.items[h][1]
+                # 在子线程内直接执行菜单动作（避免再次跨线程回调复杂化）
+                try:
+                    if callable(fn):
+                        fn()
+                except Exception:
+                    pass
             user32.DestroyWindow(hwnd)
         elif msg == WM_KEYDOWN and wparam == 27:  # ESC
             user32.DestroyWindow(hwnd)
@@ -474,14 +480,32 @@ class AcrylicMenu:
             pass
 
     def show(self):
+        """在独立线程弹菜单（窗口创建+消息循环必须同线程）——不阻塞调用方（主窗口 WndProc 钩子）。
+        选择后通过 closed_cb 回调返回；本函数立即返回。"""
+        import threading as _th
+        done = {"fn": None}
+        def _run():
+            try:
+                self._thread_show(done)
+            except Exception:
+                pass
+        th = _th.Thread(target=_run, daemon=True)
+        th.start()
+        # 等待菜单关闭（短暂等待可让 WndProc 钩子快速返回；菜单交互在子线程完成）
+        return None   # 无返回值（调用方立即返回，交互在子线程）
+
+    def _thread_show(self, done):
         if not self._reg_class():
-            return None
+            return
         w, h = self._size()
-        self._hfont = gdi32.CreateFontW(-13, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0,
-                                         0, self.FONT_NAME)
-        if not self._hfont:
+        try:
             self._hfont = gdi32.CreateFontW(-13, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0,
-                                             0, "Segoe UI")
+                                             0, self.FONT_NAME)
+            if not self._hfont:
+                self._hfont = gdi32.CreateFontW(-13, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0,
+                                                 0, "Segoe UI")
+        except Exception:
+            self._hfont = None
         pt = wintypes.POINT()
         user32.GetCursorPos(ctypes.byref(pt))
         x = max(8, pt.x - w + 8)
@@ -491,7 +515,7 @@ class AcrylicMenu:
             "OcwAcrylicMenu", "OpenClaw", WS_POPUP | WS_BORDER,
             x, y, w, h, self.owner, None, kernel32.GetModuleHandleW(None), None)
         if not hwnd:
-            return None
+            return
         enable_acrylic(hwnd)
         user32.ShowWindow(hwnd, 5)   # SW_SHOW
         user32.SetForegroundWindow(hwnd)
@@ -499,13 +523,11 @@ class AcrylicMenu:
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
-        res = self._result
         try:
             if self._hfont:
                 gdi32.DeleteObject(self._hfont)
         except Exception:
             pass
-        return res
 
 
 def open_acrylic_menu(owner_hwnd, items):
