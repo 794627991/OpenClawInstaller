@@ -352,8 +352,34 @@ except Exception:
     pass
 
 
-def enable_acrylic(hwnd, color=0x992E2E45):
-    """Acrylic 模糊（Win10 1803+ / Win11）；失败回退普通窗口"""
+def enable_acrylic(hwnd, color=0x880A141E):
+    """系统毛玻璃 backdrop（Win10 用 SetWindowCompositionAttribute Acrylic；Win11 用
+    DwmSetWindowAttribute DWMWA_SYSTEMBACKDROP_TYPE=acrylic；Win11 另附圆角）。
+    返回是否至少一项生效。"""
+    ok = False
+    # ① Win11：系统 backdrop（优先——popup 窗口用平台级 backdrop 最稳）
+    try:
+        dwm = ctypes.windll.dwmapi
+        dwm.DwmSetWindowAttribute.restype = ctypes.c_long
+        DWMWA_SYSTEMBACKDROP_TYPE = 38
+        DWMSBT_ACRYLIC = 3
+        val = ctypes.c_int(DWMSBT_ACRYLIC)
+        r = dwm.DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE,
+                                      ctypes.byref(val), ctypes.sizeof(val))
+        if r == 0:
+            ok = True
+        # Win11 圆角（popup 需 window corner preference）
+        try:
+            DWMWA_WINDOW_CORNER_PREFERENCE = 33
+            DWMWCP_ROUND = 2
+            r2 = ctypes.c_int(DWMWCP_ROUND)
+            dwm.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
+                                      ctypes.byref(r2), ctypes.sizeof(r2))
+        except Exception:
+            pass
+    except Exception:
+        pass
+    # ② Win10：accent acrylic（Win11 上此 API 对 popup 常失效，双保险）
     try:
         accent = _ACCENTPOLICY(AccentState=ACCENT_ENABLE_ACRYLICBLURBEHIND,
                                AccentFlags=2,
@@ -362,10 +388,15 @@ def enable_acrylic(hwnd, color=0x992E2E45):
                                             Data=ctypes.cast(ctypes.pointer(accent),
                                                              ctypes.c_void_p),
                                             SizeOfData=ctypes.sizeof(accent))
+        # win10 上有效 → 覆盖 Win11 时该调用无效果也无害
         user32.SetWindowCompositionAttribute(hwnd, ctypes.byref(data))
-        return True
+        ok = True
     except Exception:
-        return False
+        pass
+    return ok
+
+
+
 
 
 """毛玻璃菜单 v2：宿主消息调度（不卡死）+ Layered 半透明绘制（真玻璃质感）"""

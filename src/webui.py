@@ -78,6 +78,7 @@ class Api:
         self._auto_tries = 0           # 自动尝试次数（达到上限停止）
         self._auto_hint_shown = False  # 服务脚本缺失提示只弹一次
         self._gw_lock = threading.Lock()  # 网关命令全局互斥（launch/fix/auto 串行化）
+        self._gui_actions = queue.Queue()  # 主窗口 UI 动作队列（pump 线程执行 evaluate_js——防自锁）
         self._home_url = ""            # 主窗口 http 地址（预留）
         self._outbox = queue.Queue()   # 主线程 -> JS 的事件
         self._dlgbox = queue.Queue()   # JS -> 主线程 的对话框请求
@@ -100,6 +101,11 @@ class Api:
 
     def push_status(self, status):
         self.emit({"type": "status", "status": status})
+
+    def _gui_exec(self, fn):
+        """主窗口 UI 动作入队——由 pump 线程消费执行（evaluate_js 从 pump 线程调用安全；
+        绝不在主窗口消息泵/WndProc 内同步 evaluate_js，否则自锁「未响应」）"""
+        self._gui_actions.put(fn)
 
     def push_toast(self, text, ok=None):
         """轻提示：前端顶部浮动显示"""
@@ -1091,6 +1097,19 @@ def pump(api, win, stop_event):
                     pass
         except queue.Empty:
             pass
+        # 主窗口 UI 动作（托盘菜单等）——pump 线程执行（evaluate_js 安全）
+        try:
+            while True:
+                _fn = api._gui_actions.get_nowait()
+                try:
+                    _fn()
+                except Exception as e:
+                    try:
+                        os.write(2, ("[pump] gui_action 失败: %r\n" % e).encode("utf-8", "replace"))
+                    except Exception:
+                        pass
+        except queue.Empty:
+            pass
         # JS -> 主线程 对话框请求
         try:
             req = api._dlgbox.get_nowait()
@@ -1527,10 +1546,7 @@ def main():
             import tray as _tray
             ico_path = _icon_path()
             def _show_menu():
-                try:
-                    win.restore(); win.show()
-                except Exception:
-                    pass
+                api._gui_exec(lambda: (win.restore(), win.show()))
             def _open_dash():
                 try:
                     api.launch_usage()
@@ -1539,11 +1555,12 @@ def main():
             def _fix_gw():
                 api.fix_gateway()
             def _reconfig():
-                try:
-                    win.restore(); win.show()
-                    win.evaluate_js("goConfig('reconfig')")
-                except Exception:
-                    pass
+                # 关键：evaluate_js 必须在 pump 线程执行（主窗口 WndProc/消息线程内同步调用会自锁）
+                api._gui_exec(lambda: (
+                    win.restore(), win.show(),
+                    win.evaluate_js("goConfig('reconfig')")))
+            def _show_menu_gui():
+                api._gui_exec(lambda: (win.restore(), win.show()))
             def _quit():
                 try:
                     global _tray_obj
