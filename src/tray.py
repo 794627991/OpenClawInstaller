@@ -78,9 +78,22 @@ _OLD_PROC = None
 _PROC_FN = None
 _ACTIVE = None   # 活跃 TrayIcon 实例（回调需要）
 
+MSG_ACTION_FROM_MENU = 0x401 + 101   # 毛玻璃菜单动作（与 AcrylicMenu.MSG_ACTION 一致）
+_MENU_ITEMS = []                     # 毛玻璃菜单项（主线程按索引提取动作）
+
 
 def _hook_proc(hwnd, msg, wparam, lparam):
-    """宿主窗口替换后的 WndProc：托盘 WM_USER → 执行回调；其它转发原 proc"""
+    """宿主窗口替换后的 WndProc：托盘 WM_USER → 执行回调；菜单动作（主线程）→ 执行 fn；其它转发"""
+    if msg == MSG_ACTION_FROM_MENU and _ACTIVE:
+        # 菜单项点击：在主窗口线程执行（evaluate_js 等安全）
+        try:
+            idx = int(wparam)
+            if 0 <= idx < len(_MENU_ITEMS):
+                fn = _MENU_ITEMS[idx][1]
+                if callable(fn):
+                    fn()
+        except Exception:
+            pass
     if msg == WM_USER + 100 and _ACTIVE:
         try:
             _ACTIVE._on_lparam(lparam)
@@ -228,7 +241,10 @@ class TrayIcon:
                 for idx, (label, fn) in enumerate(self.menu_items):
                     sep = idx in getattr(self, "_sep_after", [])
                     items.append((label, fn, sep))
-                # 非阻塞：菜单在子线程弹，点击动作在子线程直接执行
+                # 寄存菜单项（主窗口钩子按索引执行）——点击动作 PostMessage 回主线程
+                global _MENU_ITEMS
+                _MENU_ITEMS = items
+                # 非阻塞：菜单在子线程弹，动作经主窗口钩子执行
                 AcrylicMenu(self.hwnd, items).show()
                 return
             except Exception:
@@ -344,26 +360,37 @@ def enable_acrylic(hwnd, color=0x992E2E45):
         return False
 
 
+"""毛玻璃菜单 v2：宿主消息调度（不卡死）+ Layered 半透明绘制（真玻璃质感）"""
+
+
 class AcrylicMenu:
-    """自绘毛玻璃弹出菜单。items: [(label, fn, sep_after_bool)]"""
-    FONT_NAME = "Microsoft YaHei UI,Segoe UI"
+    """自绘半透明菜单。
+    - 动作执行：点击时 PostMessage 宿主主窗口（WM_USER+101）→ 主窗口钩子执行（主窗口线程，evaluate_js 安全）
+    - 渲染：UpdateLayeredWindow + 32 位 alpha DIB（真半透明，跨 Win10/11；DWM 模糊与 Layered 互斥，
+      但半透明+圆角+光影已是玻璃质感，且兼容所有环境）
+    items: [(label, fn, sep_after_bool)]
+    """
+    FONT_NAME = "Microsoft YaHei UI"
     MARGIN = 12
     ITEM_H = 34
     WIDTH = 250
-    BORDER_R = 12
+    RADIUS = 12
+    MSG_ACTION = 0x401 + 101   # WM_USER+101（与宿主钩子约定）
 
     def __init__(self, owner_hwnd, items):
         self.owner = int(owner_hwnd)
         self.items = items
-        self._hits = []
-        self._hover = -1
         self._proc = None
         self._hfont = None
-        self._result = None
+        self._hwnd = None
+        self._dib = None
+        self._dibdc = None
+        self._old_dib = None
+        self._hover = -1
 
     def _size(self):
         h = self.MARGIN * 2
-        for _label, _fn, sep in self.items:
+        for _l, _f, sep in self.items:
             h += self.ITEM_H
             if sep:
                 h += 9
@@ -381,23 +408,15 @@ class AcrylicMenu:
         wc = WNDCLASSW()
         wc.hInstance = kernel32.GetModuleHandleW(None)
         wc.lpfnWndProc = ctypes.cast(self._proc, ctypes.c_void_p).value
-        wc.lpszClassName = "OcwAcrylicMenu"
+        wc.lpszClassName = "OcwGlassMenu"
         wc.hCursor = user32.LoadCursorW(None, ctypes.c_void_p(32649))
-        try:
-            user32.SetLastError(0)
-        except Exception:
-            pass
         cls = user32.RegisterClassW(ctypes.byref(wc))
         if cls:
             return True
-        # 类已存在（1410）也视为成功
         try:
-            err = user32.GetLastError()
-            if err == 1410:
-                return True
+            return user32.GetLastError() == 1410
         except Exception:
-            pass
-        return False
+            return False
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
         if msg == WM_MOUSEMOVE:
@@ -405,29 +424,26 @@ class AcrylicMenu:
             h = self._hit(y)
             if h != self._hover:
                 self._hover = h
-                user32.InvalidateRect(hwnd, None, True)
+                self._render()
         elif msg == WM_LBUTTONUP:
             y = (int(lparam) >> 16) & 0xFFFF
             h = self._hit(y)
             if 0 <= h < len(self.items):
-                self._result = self.items[h][1]
-                fn = self.items[h][1]
-                # 在子线程内直接执行菜单动作（避免再次跨线程回调复杂化）
+                # 关键：不直接执行 fn——PostMessage 宿主主窗口，由主窗口钩子（主线程）执行
                 try:
-                    if callable(fn):
-                        fn()
+                    user32.PostMessageW(self.owner, self.MSG_ACTION, h, 0)
                 except Exception:
                     pass
             user32.DestroyWindow(hwnd)
-        elif msg == WM_KEYDOWN and wparam == 27:  # ESC
+        elif msg == WM_KEYDOWN and wparam == 27:
             user32.DestroyWindow(hwnd)
         elif msg in (WM_KILLFOCUS,):
             try:
                 user32.DestroyWindow(hwnd)
             except Exception:
                 pass
-        elif msg == WM_PAINT:
-            self._paint(hwnd)
+        elif msg == WM_DESTROY:
+            self._cleanup()
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     def _hit(self, y):
@@ -436,74 +452,136 @@ class AcrylicMenu:
                 return idx
         return -1
 
-    def _paint(self, hwnd):
+    def _cleanup(self):
         try:
-            ps = wintypes.PAINTSTRUCT()
-            hdc = user32.BeginPaint(hwnd, ctypes.byref(ps))
-            w, _h = self._size()
-            # 圆角区域裁剪
-            rgn = user32.CreateRoundRectRgn(0, 0, w + 1, _h + 1,
-                                            self.BORDER_R, self.BORDER_R)
-            user32.SelectClipRgn(hdc, rgn)
-            # 背景（毛玻璃已由 DWM 提供，这里画半透明底）
-            bg = gdi32.CreateSolidBrush(0xEB2C2E46 & 0xFFFFFF)
-            user32.FillRect(hdc, ctypes.byref(ps.rcPaint), bg)
-            gdi32.DeleteObject(bg)
+            if self._dibdc and self._old_dib:
+                gdi32.SelectObject(self._dibdc, self._old_dib)
+            if self._dibdc:
+                gdi32.DeleteDC(self._dibdc)
+            if self._dib:
+                gdi32.DeleteObject(self._dib)
+            if self._hfont:
+                gdi32.DeleteObject(self._hfont)
+        except Exception:
+            pass
+        self._dib = self._dibdc = self._old_dib = self._hfont = None
+
+    def _render(self):
+        """绘制到 32 位 DIB，再用 UpdateLayeredWindow 显示（真半透明）"""
+        try:
+            w, h = self._size()
+            # 创建 32 位 DIB section
+            class BITMAPINFOHEADER(ctypes.Structure):
+                _fields_ = [("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_int32),
+                            ("biHeight", ctypes.c_int32), ("biPlanes", ctypes.c_uint16),
+                            ("biBitCount", ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+                            ("biSizeImage", ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_int32),
+                            ("biYPelsPerMeter", ctypes.c_int32), ("biClrUsed", ctypes.c_uint32),
+                            ("biClrImportant", ctypes.c_uint32)]
+            bmih = BITMAPINFOHEADER()
+            bmih.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bmih.biWidth = w
+            bmih.biHeight = -h    # 负值：顶部向下（正内存布局）
+            bmih.biPlanes = 1
+            bmih.biBitCount = 32
+            bmih.biCompression = 0  # BI_RGB
+            bits = ctypes.c_void_p()
+            self._dib = gdi32.CreateDIBSection(0, ctypes.byref(bmih), 0,
+                                               ctypes.byref(bits), None, 0)
+            self._dibdc = gdi32.CreateCompatibleDC(0)
+            self._old_dib = gdi32.SelectObject(self._dibdc, self._dib)
+
+            def px(x, y, a, r, g, b):
+                # BGRA 直接写内存
+                off = (y * w + x) * 4
+                ctypes.memset(ctypes.c_void_p(bits.value + off), 0, 0)  # 占位
+                ctypes.cast(bits.value + off, ctypes.POINTER(ctypes.c_byte))[0] = b
+                ctypes.cast(bits.value + off, ctypes.POINTER(ctypes.c_byte))[1] = g
+                ctypes.cast(bits.value + off, ctypes.POINTER(ctypes.c_byte))[2] = r
+                ctypes.cast(bits.value + off, ctypes.POINTER(ctypes.c_byte))[3] = a
+
+            # 背景：半透明深色 + 圆角 + 边框
+            BG_A, BG = 215, (0x2E, 0x2E, 0x45)
+            EDGE = (0x45, 0x47, 0x5A)
+            for yy in range(h):
+                for xx in range(w):
+                    # 圆角判定
+                    inside = True
+                    if xx < self.RADIUS and yy < self.RADIUS:
+                        dx, dy = xx - self.RADIUS, yy - self.RADIUS
+                        if dx * dx + dy * dy > self.RADIUS * self.RADIUS:
+                            inside = False
+                    elif xx >= w - self.RADIUS and yy < self.RADIUS:
+                        dx, dy = xx - (w - self.RADIUS), yy - self.RADIUS
+                        if dx * dx + dy * dy > self.RADIUS * self.RADIUS:
+                            inside = False
+                    elif xx < self.RADIUS and yy >= h - self.RADIUS:
+                        dx, dy = xx - self.RADIUS, yy - (h - self.RADIUS)
+                        if dx * dx + dy * dy > self.RADIUS * self.RADIUS:
+                            inside = False
+                    elif xx >= w - self.RADIUS and yy >= h - self.RADIUS:
+                        dx, dy = xx - (w - self.RADIUS), yy - (h - self.RADIUS)
+                        if dx * dx + dy * dy > self.RADIUS * self.RADIUS:
+                            inside = False
+                    if not inside:
+                        continue  # 透明
+                    a = BG_A
+                    # 边框（外沿 1px 亮一点）
+                    if (yy < 1 or yy >= h - 1 or xx < 1 or xx >= w - 1):
+                        px(xx, yy, 230, EDGE[0], EDGE[1], EDGE[2])
+                    else:
+                        px(xx, yy, a, BG[0], BG[1], BG[2])
+
+            # 悬停高亮 + 文字
+            gdi32.SelectObject(self._dibdc, self._hfont)
+            user32.SetBkMode(self._dibdc, 1)   # TRANSPARENT
             self._hits = []
             y = self.MARGIN
-            n = len(self.items)
-            for idx in range(n):
-                label, fn, sep = self.items[idx]
+            for idx, (label, fn, sep) in enumerate(self.items):
                 if self._hover == idx:
-                    hb = gdi32.CreateSolidBrush(0x30344E60)
-                    gdi32.SelectObject(hdc, hb)
-                    user32.RoundRect(hdc, self.MARGIN, y, w - self.MARGIN,
-                                     y + self.ITEM_H, 9, 9)
-                    gdi32.DeleteObject(hb)
-                gdi32.SelectObject(hdc, self._hfont)
-                user32.SetBkMode(hdc, 1)
-                user32.SetTextColor(hdc, 0xF5E8DC)
-                user32.TextOutW(hdc, self.MARGIN + 14, y + (self.ITEM_H - 16) // 2,
-                                label, len(label))
+                    # 浅色高亮块（圆角近似）
+                    for yy in range(y + 2, y + self.ITEM_H - 2):
+                        for xx in range(self.MARGIN + 2, w - self.MARGIN - 2):
+                            px(xx, yy, 150, 0x60, 0x5E, 0x8A)
+                # 文字（白色）
+                user32.SetTextColor(self._dibdc, 0xE5E0DC)
+                user32.TextOutW(self._dibdc, self.MARGIN + 14,
+                                y + (self.ITEM_H - 16) // 2, label, len(label))
                 self._hits.append((y, y + self.ITEM_H))
                 y += self.ITEM_H
-                if sep and idx < n - 1:
-                    pen = gdi32.CreatePen(PS_SOLID, 1, 0x55404570)
-                    gdi32.SelectObject(hdc, pen)
-                    user32.MoveToEx(hdc, self.MARGIN + 8, y + 4, None)
-                    user32.LineTo(hdc, w - self.MARGIN - 8, y + 4)
-                    gdi32.DeleteObject(pen)
+                if sep:
+                    # 分隔线（半透明）
+                    ly = y + 4
+                    for xx in range(self.MARGIN + 10, w - self.MARGIN - 10):
+                        px(xx, ly, 120, 0x50, 0x55, 0x77)
                     y += 9
-            user32.DeleteObject(rgn)
-            user32.EndPaint(hwnd, ctypes.byref(ps))
+
+            # UpdateLayeredWindow
+            class POINTX(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+            class SIZE_T(ctypes.Structure):
+                _fields_ = [("cx", ctypes.c_long), ("cy", ctypes.c_long)]
+            class BLENDFUNCTION(ctypes.Structure):
+                _fields_ = [("BlendOp", ctypes.c_byte), ("BlendFlags", ctypes.c_byte),
+                            ("SourceConstantAlpha", ctypes.c_byte),
+                            ("AlphaFormat", ctypes.c_byte)]
+            dst = POINTX(0, 0)
+            src = POINTX(0, 0)
+            size = SIZE_T(w, h)
+            bf = BLENDFUNCTION(0, 0, 255, 1)   # AC_SRC_ALPHA
+            user32.UpdateLayeredWindow(self._hwnd, user32.GetDC(None), None,
+                                       ctypes.byref(size), self._dibdc,
+                                       ctypes.byref(src), 0, ctypes.byref(bf), 2)
         except Exception:
             pass
 
-    def show(self):
-        """在独立线程弹菜单（窗口创建+消息循环必须同线程）——不阻塞调用方（主窗口 WndProc 钩子）。
-        选择后通过 closed_cb 回调返回；本函数立即返回。"""
-        import threading as _th
-        done = {"fn": None}
-        def _run():
-            try:
-                self._thread_show(done)
-            except Exception:
-                pass
-        th = _th.Thread(target=_run, daemon=True)
-        th.start()
-        # 等待菜单关闭（短暂等待可让 WndProc 钩子快速返回；菜单交互在子线程完成）
-        return None   # 无返回值（调用方立即返回，交互在子线程）
-
-    def _thread_show(self, done):
+    def _thread_show(self):
         if not self._reg_class():
             return
         w, h = self._size()
         try:
             self._hfont = gdi32.CreateFontW(-13, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0,
                                              0, self.FONT_NAME)
-            if not self._hfont:
-                self._hfont = gdi32.CreateFontW(-13, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0,
-                                                 0, "Segoe UI")
         except Exception:
             self._hfont = None
         pt = wintypes.POINT()
@@ -511,25 +589,25 @@ class AcrylicMenu:
         x = max(8, pt.x - w + 8)
         y = max(8, pt.y - h - 12)
         hwnd = user32.CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-            "OcwAcrylicMenu", "OpenClaw", WS_POPUP | WS_BORDER,
+            0x80000 | 0x8 | 0x80,   # WS_EX_LAYERED | TOPMOST | TOOLWINDOW
+            "OcwGlassMenu", "OpenClaw", 0x80000000,   # WS_POPUP
             x, y, w, h, self.owner, None, kernel32.GetModuleHandleW(None), None)
         if not hwnd:
             return
-        enable_acrylic(hwnd)
-        user32.ShowWindow(hwnd, 5)   # SW_SHOW
-        user32.SetForegroundWindow(hwnd)
+        self._hwnd = hwnd
+        self._render()
+        user32.ShowWindow(hwnd, 4)   # SW_SHOWNOACTIVATE
         msg = wintypes.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
-        try:
-            if self._hfont:
-                gdi32.DeleteObject(self._hfont)
-        except Exception:
-            pass
+
+    def show(self):
+        """非阻塞弹菜单：独立线程（窗口与消息泵同线程）；动作经宿主 PostMessage 回主线程执行"""
+        import threading as _th
+        _th.Thread(target=self._thread_show, daemon=True).start()
+        return None
 
 
 def open_acrylic_menu(owner_hwnd, items):
-    """打开毛玻璃菜单；items=[(label, fn)]；返回被点击的 fn 或 None"""
     return AcrylicMenu(owner_hwnd, items).show()
