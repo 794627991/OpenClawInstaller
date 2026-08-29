@@ -47,6 +47,36 @@
 - [ ] Node.js 静默安装 msiexec 日志排查脚本
 - [ ] 仪表盘「Default model: Off」现象跟踪（openclaw 前端显示逻辑，待确认是否需要在工具内补偿）
 
+
+## 🔷 竞品调研 + 托盘卡片面板（2026-08-30）
+
+**竞品库**：`D:\AI_PROJECT\openclaw-competitors\`（9 仓库 clone 完成）
+- 直接同类：01 agentkernel/openclaw-desktop（Electron，打包期预装 Node，黑屏事故复盘）、02 easyclaw（WSL 路线，对小白不友好）、03 daxiondi（Tauri+离线载荷+Codex 复用）、04 ChatClaw（Go/Wails 悬浮球+托盘）、05 standalone（Inno 零依赖）、06 offline-package（bat 编号入口）、07 openclaw-windows-node（官方 C# 托盘卡片面板——对标对象）、08 openclaw-guide（中文文档站）、09 portable（npmmirror+token 自动复制）
+- 结论：内置便携 Node 是竞品最优解（预装 node.exe ~93MB + openclaw ~371MB）；**用户已决定 Node 维持现状（检测/装系统 Node）**
+- 用户点名对标 07 的面板：配色（近黑+浅灰+绿/黄/红点+蓝 Toggle）、功能（连接开关、状态行、Gateway 卡、会话/用量行）、"直接配置 claw"入口
+
+### ✅ 面板 v2 已完成（2026-08-30，默认启用，OCW_PANEL=0 回退系统菜单）
+- [x] 原版 07 配色：深底 #15161C、浅灰文字、绿/黄/红状态点、蓝色 Toggle、分段卡+badge"Local"
+- [x] 标题行 + 右侧连接 Toggle（点击 = gateway start/stop，全局互斥）
+- [x] 状态行（点+状态文字+addr+右侧版本）、"使用模型"行
+- [x] Gateway 卡（卡头+badge、"127.0.0.1:18789 · 本机 1 节点"）
+- [x] 按钮组：打开工作台（主色通栏）/ 控制面板 / 重新配置 / 修复网关 / 退出
+- [x] 删除「复制诊断」（用户要求不出现在面板）；新配色直接照原版截图
+
+### ⏳ 待办：面板剩余功能（记自 07 原版截图/红圈，数据源未定）
+- [ ] **会话/用量统计行**（"1/1 node · 11 sessions · $13.84"、Sessions/Usage 子行）——官方 UI 无 REST API（JS 仅 ws://127.0.0.1:18789），数据需走 WebSocket 协议；参考 07 的 `TrayMenuRenderer.cs` + `OpenClaw.Connection` 实现（C#，已 clone）
+- [ ] **进度条**（ctx 占用，>80% 黄 >95% 红）——同 WS 数据源
+- [ ] **权限开关**（Permissions 直接开关能力）——需网关能力清单接口
+- [ ] 卡片 hover 悬浮层（版本/在线客户端/待审批计数）——07 GatewayCard 的展开细节
+- [ ] 面板实时刷新（Updated 2s ago）——现在每次右键重新抓快照
+- [ ] 菜单入口项：Dashboard/Chat/Canvas/Diagnostics（差异化：我们的"打开工作台/控制面板"已覆盖核心，Chat/Canvas 待官方页面可用性确认）
+- [ ] Toggle 状态即时反馈（现在点开关后需重新右键看状态；面板关闭时用 toast 过渡）
+
+### ⏳ Node 路线（用户已拍板维持现状，记录备选）
+- [ ] 备选 1：打包期抠 node.exe（93MB）进包（01 的 download-node.ts 做法），openclaw 走 npmmirror 在线装（1-3 分钟）
+- [ ] 备选 2：全程联网下载便携 Node + npmmirror 装 openclaw（09 的 start-online.bat 配方；token 自动复制+`?token=` 自动开浏览器也是 09 的）
+- [ ] 端口占用自动 +1 回退（09 start.bat：18789→18790）
+---
 ## ✅ 已完成的里程碑（2026-08-24 ~ 08-26）
 
 - [x] tkinter 版核心安装器（环境检测/PATH 修复/提权/40+ 服务商/5 步配置）

@@ -699,107 +699,131 @@ class _SIZEX(ctypes.Structure):
 
 
 class AcrylicPanel:
-    """spec = {"status": "green|yellow|red", "title": str, "version": str,
-              "rows": [(key, val), ...]}
-    actions = [(label, fn), ...]：首按钮通栏主色，其余两列"""
-    WIDTH = 280
-    MARGIN = 14
+    """07 式托盘卡片面板 v2：原版配色（近黑深底+浅灰文字+绿/黄/红状态点+蓝 Toggle+分段卡）
+    行结构：标题+Toggle / 状态行(点+文字+addr+右侧版本) / 模型行 / 分隔 / Gateway 卡头+badge /
+            卡体行 / 分隔 / 按钮组
+    spec = {"title","version","status","status_text","addr","model","badge","node","toggle_on"}
+    actions = [(kind, label, fn)]：
+        kind= "toggle" 标题行右侧开关 | "main" 通栏主按钮 | "btn" 双列 | "quit" 通栏"""
+    WIDTH = 320
+    MARGIN = 16
     RADIUS = 14
     BTN_H = 38
     BTN_GAP = 8
-    ROW_H = 24
 
-    _DOT = {"green": 0x3FC27B, "yellow": 0xF2C153, "red": 0xE5634F}
-    _TXT = {"green": "运行中", "yellow": "启动中…", "red": "未运行"}
-    _TCLR = {"green": 0x7AD9A4, "yellow": 0xF2D180, "red": 0xF0A98F}
+    _DOT = {"green": 0x35C97E, "yellow": 0xF0C043, "red": 0xE5564E}
+    _TCLR = {"green": 0x8FDDB4, "yellow": 0xF0D288, "red": 0xF2A28C}
 
-    C_BG = 0x1B202B
-    C_EDGE = 0x39415A
-    C_KEY = 0x8A90A5
-    C_VAL = 0xE9ECF3
-    C_SEP = 0x262C3E
-    C_BTN = 0x242B3C
-    C_BTN_HOVER = 0x2E3750
-    C_PRIMARY = 0x2E6BDB
-    C_PRIMARY_HOVER = 0x3E7CEB
+    C_BG = 0x15161C
+    C_EDGE = 0x2A2C36
+    C_TXT = 0xF2F2F6
+    C_SUB = 0x9A9CA8
+    C_WEAK = 0x63656F
+    C_SEP = 0x23252E
+    C_BTN = 0x20222B
+    C_BTN_HOVER = 0x2C2E3A
+    C_MAIN = 0x2E6BDB
+    C_MAIN_HOVER = 0x3E7CEB
+    C_TOG_ON = 0x3B82F6
+    C_TOG_OFF = 0x33343E
+    C_BADGE_BG = 0x23242E
+    C_GOOD = 0x35C97E
 
     def __init__(self, owner_hwnd, spec, actions):
         self.owner = int(owner_hwnd)
         self.spec = spec
         self.actions = actions
         self._hwnd = None
-        self._hover_btn = -1
-        self._status_y = 0
-        self._title_y = 0
-        self._sep1 = 0
-        self._sep2 = 0
-        self._row_ys = []
-        self._btns = []      # [(x0,y0,x1,y1)] 与 actions 同序
+        self._hover = -1
+        self._btn_rows = []         # [(x0,y0,x1,y1,kind,action_idx)]
+        self._toggle_rect = None
+        self._hdr_y = self._st_y = self._md_y = self._gwhd_y = self._gwbd_y = 0
+        self._sep1 = self._sep2 = 0
         self._w = self.WIDTH
         self._h = 0
         self._hfont = None
         self._hfont_b = None
         self._hfont_s = None
 
+    def _size(self):
+        return self.WIDTH, self._h
+
     def _calc(self):
-        """布局单源：paint 与 命中 共用（同一套坐标，绝不猜）"""
-        rows = self.spec.get("rows") or []
-        n = len(self.actions)
         m = self.MARGIN
         y = m
-        self._status_y = y; y += 26
-        self._title_y = y; y += 26
-        self._sep1 = y; y += 10
-        self._row_ys = []
-        for _r in rows:
-            self._row_ys.append(y); y += self.ROW_H
-        self._sep2 = y; y += 11
-        self._btns = []
-        if n:
-            self._btns.append((m, y, self.WIDTH - m, y + self.BTN_H))
-            y += self.BTN_H + self.BTN_GAP
-            if n >= 2:
+        self._hdr_y = y; y += 32
+        self._st_y = y; y += 27
+        self._md_y = y; y += 25
+        self._sep1 = y - 2; y += 13
+        self._gwhd_y = y; y += 27
+        self._gwbd_y = y; y += 25
+        self._sep2 = y - 2; y += 13
+        self._btn_rows = []
+        # 按钮网格：main/quit 通栏；btn 双列（落单自动双宽）
+        i = 0
+        while i < len(self.actions):
+            kind, label, fn = self.actions[i]
+            if kind in ("main", "quit"):
+                self._btn_rows.append((m, y, self.WIDTH - m, y + self.BTN_H, kind, i))
+                y += self.BTN_H + self.BTN_GAP
+                i += 1
+            else:
+                row = [(kind, i)]
+                if i + 1 < len(self.actions) and self.actions[i + 1][0] == "btn":
+                    row.append((self.actions[i + 1][0], i + 1))
+                    i += 2
+                else:
+                    i += 1
                 half = int((self.WIDTH - 2 * m - self.BTN_GAP) / 2)
-                for i in range(n - 1):
-                    row, col = divmod(i, 2)
-                    bx = m + col * (half + self.BTN_GAP)
-                    by = y + row * (self.BTN_H + self.BTN_GAP)
-                    self._btns.append((bx, by, bx + half, by + self.BTN_H))
-                y = self._btns[-1][3]
+                if len(row) == 2:
+                    self._btn_rows.append((m, y, m + half, y + self.BTN_H, "btn", row[0][1]))
+                    self._btn_rows.append((m + half + self.BTN_GAP, y, self.WIDTH - m,
+                                          y + self.BTN_H, "btn", row[1][1]))
+                    y += self.BTN_H + self.BTN_GAP
+                else:
+                    self._btn_rows.append((m, y, self.WIDTH - m, y + self.BTN_H, "btn", row[0][1]))
+                    y += self.BTN_H + self.BTN_GAP
+        self._toggle_rect = (self.WIDTH - m - 42, self._hdr_y + 4,
+                             self.WIDTH - m, self._hdr_y + 24)
         self._h = y + 16
 
     def _font(self):
         self._hfont = gdi32.CreateFontW(-13, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0,
                                         "Microsoft YaHei UI")
-        self._hfont_b = gdi32.CreateFontW(-15, 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 0, 0,
+        self._hfont_b = gdi32.CreateFontW(-16, 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 0, 0,
                                           "Microsoft YaHei UI")
         self._hfont_s = gdi32.CreateFontW(-11, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0,
                                           "Microsoft YaHei UI")
 
-    def _hit_btn(self, x, y):
-        for idx, (x0, y0, x1, y1) in enumerate(self._btns):
+    def _hit(self, x, y):
+        for idx, (x0, y0, x1, y1, _k, ai) in enumerate(self._btn_rows):
             if x0 <= x <= x1 and y0 <= y <= y1:
-                return idx
+                return ai
+        if self._toggle_rect:
+            x0, y0, x1, y1 = self._toggle_rect
+            if x0 - 4 <= x <= x1 + 4 and y0 - 4 <= y <= y1 + 4:
+                if self.actions and self.actions[0][0] == "toggle":
+                    return 0
         return -1
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
         try:
             if msg == WM_MOUSEMOVE:
-                x, y = (int(lparam)) & 0xFFFF, (int(lparam) >> 16) & 0xFFFF
-                h = self._hit_btn(x, y)
-                if h != self._hover_btn:
-                    self._hover_btn = h
+                x, y = int(lparam) & 0xFFFF, (int(lparam) >> 16) & 0xFFFF
+                h = self._hit(x, y)
+                if h != self._hover:
+                    self._hover = h
                     user32.InvalidateRect(hwnd, None, True)
             elif msg == WM_LBUTTONUP:
-                x, y = (int(lparam)) & 0xFFFF, (int(lparam) >> 16) & 0xFFFF
-                h = self._hit_btn(x, y)
-                _dbg("面板 WM_LBUTTONUP x=%d y=%d hit=%d" % (x, y, h))
+                x, y = int(lparam) & 0xFFFF, (int(lparam) >> 16) & 0xFFFF
+                h = self._hit(x, y)
+                _dbg("面板 v2 WM_LBUTTONUP x=%d y=%d hit=%d" % (x, y, h))
                 if 0 <= h < len(self.actions):
                     try:
                         user32.PostMessageW(self.owner, MSG_ACTION_FROM_MENU, h, 0)
-                        _dbg("面板已 post owner msg_action h=%s" % h)
+                        _dbg("面板 v2 已 post owner msg_action h=%s" % h)
                     except Exception as e:
-                        _dbg("面板 post 失败 %r" % e)
+                        _dbg("面板 v2 post 失败 %r" % e)
                 user32.DestroyWindow(hwnd)
             elif msg == WM_PAINT:
                 self._paint(hwnd)
@@ -819,8 +843,20 @@ class AcrylicPanel:
                     except Exception:
                         pass
         except Exception as e:
-            _dbg("面板 _wndproc 异常 msg=0x%04x %r" % (int(msg), e))
+            _dbg("面板 v2 _wndproc 异常 msg=0x%04x %r" % (int(msg), e))
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def _fill_rect(self, hdc, x0, y0, x1, y1, color, rad=0):
+        brush = gdi32.CreateSolidBrush(color)
+        pen = gdi32.CreatePen(0, 1, color)
+        gdi32.SelectObject(hdc, brush)
+        gdi32.SelectObject(hdc, pen)
+        if rad:
+            gdi32.RoundRect(hdc, x0, y0, x1, y1, rad, rad)
+        else:
+            gdi32.Rectangle(hdc, x0, y0, x1, y1)
+        gdi32.DeleteObject(brush)
+        gdi32.DeleteObject(pen)
 
     def _paint(self, hwnd):
         try:
@@ -830,7 +866,8 @@ class AcrylicPanel:
                 return
             w, h = self._w, self._h
             m = self.MARGIN
-            # 背景：深色圆角卡 + 1px 边框
+            gdi32.SetBkMode(hdc, 1)   # TRANSPARENT
+            # 背景圆角卡 + 1px 边框
             brush = gdi32.CreateSolidBrush(self.C_BG)
             pen = gdi32.CreatePen(0, 1, self.C_EDGE)
             gdi32.SelectObject(hdc, brush)
@@ -838,29 +875,50 @@ class AcrylicPanel:
             gdi32.RoundRect(hdc, 0, 0, w, h, self.RADIUS * 2, self.RADIUS * 2)
             gdi32.DeleteObject(brush)
             gdi32.DeleteObject(pen)
-            gdi32.SetBkMode(hdc, 1)   # TRANSPARENT
-            st = self.spec.get("status", "red")
-            # 状态点 + 状态文字
-            gdi32.SelectObject(hdc, self._hfont)
-            brush = gdi32.CreateSolidBrush(self._DOT.get(st, self._DOT["red"]))
-            gdi32.SelectObject(hdc, brush)
-            gdi32.Ellipse(hdc, m, self._status_y + 6, m + 12, self._status_y + 18)
-            gdi32.DeleteObject(brush)
-            gdi32.SetTextColor(hdc, self._TCLR.get(st, self._TCLR["red"]))
-            st_txt = self._TXT.get(st, "未知")
-            gdi32.TextOutW(hdc, m + 22, self._status_y, st_txt, len(st_txt))
-            # 标题（粗体白）+ 版本（右侧小字）
+            # ① 标题（粗白）
             gdi32.SelectObject(hdc, self._hfont_b)
-            gdi32.SetTextColor(hdc, 0xFFFFFF)
+            gdi32.SetTextColor(hdc, self.C_TXT)
             t = self.spec.get("title", "OpenClaw")
-            gdi32.TextOutW(hdc, m, self._title_y, t, len(t))
+            gdi32.TextOutW(hdc, m, self._hdr_y, t, len(t))
+            # ② Toggle（标题行右）
+            if self._toggle_rect:
+                tx0, ty0, tx1, ty1 = self._toggle_rect
+                on = bool(self.spec.get("toggle_on"))
+                self._fill_rect(hdc, tx0, ty0, tx1, ty1,
+                                self.C_TOG_ON if on else self.C_TOG_OFF, 20)
+                c = tx0 + 18 if on else tx0 + 2
+                b2 = gdi32.CreateSolidBrush(0xF4F5F8)
+                gdi32.SelectObject(hdc, b2)
+                gdi32.Ellipse(hdc, c, ty0 + 2, c + 14, ty0 + 16)
+                gdi32.DeleteObject(b2)
+            # ③ 状态行：点 + 状态文字 + addr，右侧版本
+            gdi32.SelectObject(hdc, self._hfont)
+            st = self.spec.get("status", "red")
+            b3 = gdi32.CreateSolidBrush(self._DOT.get(st, self._DOT["red"]))
+            gdi32.SelectObject(hdc, b3)
+            gdi32.Ellipse(hdc, m, self._st_y + 5, m + 10, self._st_y + 15)
+            gdi32.DeleteObject(b3)
+            gdi32.SetTextColor(hdc, self._TCLR.get(st, self._TCLR["red"]))
+            stt = self.spec.get("status_text", "")
+            gdi32.TextOutW(hdc, m + 18, self._st_y, stt, len(stt))
+            addr = self.spec.get("addr", "")
+            if addr:
+                gdi32.SetTextColor(hdc, self.C_SUB)
+                txt = "  ·  " + addr
+                gdi32.TextOutW(hdc, m + 24 + len(stt) * 14, self._st_y, txt, len(txt))
             gdi32.SelectObject(hdc, self._hfont_s)
-            gdi32.SetTextColor(hdc, self.C_KEY)
+            gdi32.SetTextColor(hdc, self.C_WEAK)
             gdi32.SetTextAlign(hdc, TA_RIGHT)
             v = self.spec.get("version") or ""
-            gdi32.TextOutW(hdc, w - m, self._title_y + 6, v, len(v))
+            gdi32.TextOutW(hdc, w - m, self._st_y + 3, v, len(v))
             gdi32.SetTextAlign(hdc, TA_LEFT)
-            # 两条分隔线
+            # ④ 模型行（弱灰）
+            gdi32.SetTextColor(hdc, self.C_WEAK)
+            md = self.spec.get("model", "")
+            if md:
+                mtxt = "使用模型  ·  " + md
+                gdi32.TextOutW(hdc, m, self._md_y, mtxt, len(mtxt))
+            # ⑤ 分隔线 x2
             pen = gdi32.CreatePen(0, 1, self.C_SEP)
             gdi32.SelectObject(hdc, pen)
             gdi32.MoveToEx(hdc, m, self._sep1, None)
@@ -868,44 +926,54 @@ class AcrylicPanel:
             gdi32.MoveToEx(hdc, m, self._sep2, None)
             gdi32.LineTo(hdc, w - m, self._sep2)
             gdi32.DeleteObject(pen)
-            # 键值行
-            gdi32.SelectObject(hdc, self._hfont_s)
-            for (key, val), yy in zip(self.spec.get("rows") or [], self._row_ys):
-                gdi32.SetTextColor(hdc, self.C_KEY)
-                gdi32.TextOutW(hdc, m, yy, key, len(key))
-                gdi32.SetTextColor(hdc, self.C_VAL)
-                gdi32.SetTextAlign(hdc, TA_RIGHT)
-                gdi32.TextOutW(hdc, w - m, yy, val, len(val))
-                gdi32.SetTextAlign(hdc, TA_LEFT)
-            # 按钮
+            # ⑥ Gateway 卡头：点 + 标题 + badge
+            b6 = gdi32.CreateSolidBrush(self.C_GOOD)
+            gdi32.SelectObject(hdc, b6)
+            gdi32.Ellipse(hdc, m, self._gwhd_y + 6, m + 10, self._gwhd_y + 16)
+            gdi32.DeleteObject(b6)
             gdi32.SelectObject(hdc, self._hfont)
-            for idx, (label, fn) in enumerate(self.actions):
-                x0, y0, x1, y1 = self._btns[idx]
-                if idx == 0:
-                    bg = self.C_PRIMARY_HOVER if idx == self._hover_btn else self.C_PRIMARY
+            gdi32.SetTextColor(hdc, self.C_TXT)
+            gwt = "Gateway"
+            gdi32.TextOutW(hdc, m + 18, self._gwhd_y, gwt, len(gwt))
+            bdg = self.spec.get("badge", "")
+            if bdg:
+                gdi32.SelectObject(hdc, self._hfont_s)
+                sz = _SIZEX()
+                gdi32.GetTextExtentPoint32W(hdc, bdg, len(bdg), ctypes.byref(sz))
+                self._fill_rect(hdc, w - m - sz.cx - 12, self._gwhd_y,
+                                w - m, self._gwhd_y + 17, self.C_BADGE_BG, 12)
+                gdi32.SetTextColor(hdc, 0xC9CBD4)
+                gdi32.TextOutW(hdc, w - m - sz.cx - 6, self._gwhd_y + 1, bdg, len(bdg))
+            # ⑦ 卡体行
+            gdi32.SelectObject(hdc, self._hfont_s)
+            gdi32.SetTextColor(hdc, self.C_SUB)
+            body = self.spec.get("node", "")
+            atxt = "%s  ·  %s" % (addr or "?", body)
+            gdi32.TextOutW(hdc, m + 18, self._gwbd_y, atxt, len(atxt))
+            # ⑧ 按钮
+            gdi32.SelectObject(hdc, self._hfont)
+            for (x0, y0, x1, y1, kind, ai) in self._btn_rows:
+                label = self.actions[ai][1]
+                hv = self._hover == ai
+                if kind == "main":
+                    bg = self.C_MAIN_HOVER if hv else self.C_MAIN
                     tc = 0xFFFFFF
                 else:
-                    bg = self.C_BTN_HOVER if idx == self._hover_btn else self.C_BTN
-                    tc = 0xDCE0EC
-                brush = gdi32.CreateSolidBrush(bg)
-                pen = gdi32.CreatePen(0, 1, bg)
-                gdi32.SelectObject(hdc, brush)
-                gdi32.SelectObject(hdc, pen)
-                gdi32.RoundRect(hdc, x0, y0, x1, y1, 9, 9)
-                gdi32.DeleteObject(brush)
-                gdi32.DeleteObject(pen)
+                    bg = self.C_BTN_HOVER if hv else self.C_BTN
+                    tc = 0xD6D8E0
+                self._fill_rect(hdc, x0, y0, x1, y1, bg, 18)
                 sz = _SIZEX()
                 gdi32.GetTextExtentPoint32W(hdc, label, len(label), ctypes.byref(sz))
                 gdi32.SetTextColor(hdc, tc)
                 gdi32.TextOutW(hdc, (x0 + x1 - sz.cx) // 2,
                                y0 + (self.BTN_H - sz.cy) // 2, label, len(label))
             user32.EndPaint(hwnd, ctypes.byref(ps))
-            _dbg("面板 WM_PAINT 完成 btns=%d rows=%d hover=%d"
-                 % (len(self._btns), len(self._row_ys), self._hover_btn))
+            _dbg("面板 v2 WM_PAINT 完成 btns=%d toggle=%s" % (len(self._btn_rows),
+                                                              bool(self.spec.get("toggle_on"))))
         except Exception:
             try:
                 import traceback as _tb
-                _dbg("面板 _paint 异常:\n%s" % _tb.format_exc())
+                _dbg("面板 v2 _paint 异常:\n%s" % _tb.format_exc())
             except Exception:
                 pass
 
@@ -925,12 +993,12 @@ class AcrylicPanel:
                 "OcwPanelV1", "OpenClaw", 0x80000000,   # WS_POPUP
                 x, y, w, h, None, None, kernel32.GetModuleHandleW(None), None)
             if not hwnd:
-                _dbg("面板 CreateWindowExW 失败")
+                _dbg("面板 v2 CreateWindowExW 失败")
                 return
             self._hwnd = hwnd
             _MENU_INSTANCES[int(hwnd)] = self
-            _dbg("面板窗口创建 hwnd=%s btns=%d h=%d" % (int(hwnd), len(self._btns), self._h))
-            user32.ShowWindow(hwnd, 5)   # SW_SHOW（激活）
+            _dbg("面板 v2 创建 hwnd=%s btns=%d h=%d" % (int(hwnd), len(self._btn_rows), self._h))
+            user32.ShowWindow(hwnd, 5)
             try:
                 user32.SetForegroundWindow(hwnd)
             except Exception:
@@ -941,7 +1009,7 @@ class AcrylicPanel:
                 user32.DispatchMessageW(ctypes.byref(msg))
             _dbg("面板消息泵退出")
         except Exception as e:
-            _dbg("面板线程异常 %r" % e)
+            _dbg("面板 v2 线程异常 %r" % e)
 
     def show(self):
         """非阻塞弹面板；先关残留面板/菜单（连点右键不叠加）"""
@@ -956,7 +1024,7 @@ class AcrylicPanel:
 
 
 def open_panel(owner_hwnd, spec, actions):
-    """弹 07 式卡片面板。actions 写入 _MENU_ITEMS（主窗口钩子按索引执行）"""
+    """弹 07 式卡片面板。actions=[(kind,label,fn)]，写入 _MENU_ITEMS（主窗口钩子按索引执行）"""
     global _MENU_ITEMS
-    _MENU_ITEMS = [(l, f, False) for (l, f) in actions]
+    _MENU_ITEMS = [(l, f, False) for (_k, l, f) in actions]
     return AcrylicPanel(owner_hwnd, spec, actions).show()

@@ -58,37 +58,6 @@ def wrb_log(msg):
         pass
 
 # ============================================================
-# 剪贴板（ctypes 直接写 UTF-16，无第三方依赖）——托盘"复制诊断"用
-# ============================================================
-def _clipboard_set(text):
-    """返回是否成功。CF_UNICODETEXT + GMEM_MOVEABLE|ZEROINIT"""
-    try:
-        import ctypes as _c
-        u = _c.windll.user32
-        k = _c.windll.kernel32
-        k.GlobalAlloc.restype = _c.c_void_p
-        k.GlobalLock.restype = _c.c_void_p
-        if not u.OpenClipboard(None):
-            return False
-        try:
-            u.EmptyClipboard()
-            data = (str(text) + "\0").encode("utf-16-le")
-            h = k.GlobalAlloc(0x0042, len(data))
-            if not h:
-                return False
-            p = k.GlobalLock(h)
-            if p:
-                _c.memmove(p, data, len(data))
-                k.GlobalUnlock(h)
-            u.SetClipboardData(13, h)   # CF_UNICODETEXT
-            return True
-        finally:
-            u.CloseClipboard()
-    except Exception:
-        return False
-
-
-# ============================================================
 # 前端 <-> 后端桥接
 # ============================================================
 class Api:
@@ -1632,51 +1601,45 @@ def main():
                     _tray_obj.update_tip(tip)
                 except Exception:
                     pass
-            def _copy_diag():
-                """复制诊断信息（状态+配置摘要+日志尾部）到剪贴板"""
-                try:
-                    if api._health_ok():
-                        gw_txt = "运行中"
-                    elif api._ping_http():
-                        gw_txt = "启动中（HTTP 未就绪）"
-                    else:
-                        gw_txt = "未运行"
-                    lines = ["=== OpenClaw 工作台 诊断 ===",
-                             "时间: %s" % time.strftime("%Y-%m-%d %H:%M:%S"),
-                             "版本: %s" % (core.get_openclaw_version() or "未安装"),
-                             "网关: %s (端口 %s)" % (gw_txt, api._gateway_port()),
-                             "模型: %s" % api._model_display(),
-                             "日志: %s" % _log_path(),
-                             "--- 日志尾部 30 行 ---"]
+            def _toggle_gw():
+                """面板连接开关：运行中→stop；未运行→start（后台线程 + 全局互斥）"""
+                def run():
                     try:
-                        with open(_log_path(), encoding="utf-8", errors="replace") as f:
-                            lines += [l.rstrip() for l in list(f.readlines())[-30:]]
-                    except Exception:
-                        lines.append("(无日志)")
-                    if _clipboard_set("\n".join(lines)):
-                        api.push_toast("✅ 诊断信息已复制到剪贴板", True)
-                    else:
-                        api.push_toast("⚠️ 复制失败：剪贴板被占用", False)
-                except Exception as e:
-                    api.push_toast("⚠️ 复制诊断失败: %s" % e, False)
+                        on = api._ping_http()
+                        with api._gw_lock:
+                            if on:
+                                api.push_log("  托盘开关：停止网关…")
+                                core.run_cmd(claw_cmd() + " gateway stop",
+                                             callback=api.push_log, timeout=40)
+                                api.push_toast("🛑 网关已停止", True)
+                            else:
+                                api.push_log("  托盘开关：启动网关…")
+                                core.run_cmd(claw_cmd() + " gateway start",
+                                             callback=api.push_log, timeout=40)
+                                api.push_toast("✅ 网关启动中…", False)
+                    except Exception as e:
+                        api.push_toast("⚠️ 切换失败: %s" % e, False)
+                threading.Thread(target=run, daemon=True).start()
 
             def _panel_spec():
-                """07 式面板内容：状态三色 + 版本 + 键值行（鼠标离开前抓快照）"""
+                """07 式面板内容：状态三色 + 版本 + 地址/模型 + Gateway 卡（打开时抓快照）"""
                 if api._health_ok():
-                    st = "green"
+                    st, stt = "green", "网关运行中"
                 elif api._ping_http():
-                    st = "yellow"
+                    st, stt = "yellow", "启动中…"
                 else:
-                    st = "red"
+                    st, stt = "red", "未运行"
                     try:
                         api._auto_start_gateway()   # 与 get_status 同策略：后台自动恢复（限流）
                     except Exception:
                         pass
-                rows = [("监听地址", "127.0.0.1:%s" % api._gateway_port()),
-                        ("当前模型", api._model_display())]
-                return {"status": st, "title": "OpenClaw 工作台",
+                return {"title": "OpenClaw 工作台",
                         "version": core.get_openclaw_version() or "未安装",
-                        "rows": rows}
+                        "status": st, "status_text": stt,
+                        "addr": "127.0.0.1:%s" % api._gateway_port(),
+                        "model": api._model_display(),
+                        "badge": "Local", "node": "本机 1 节点",
+                        "toggle_on": st != "red"}
 
             _tray_obj = None
             def _panel_route():
@@ -1684,12 +1647,12 @@ def main():
                 if os.environ.get("OCW_PANEL", "1") != "0":
                     try:
                         _tray.open_panel(_hwnd, _panel_spec(), [
-                            ("打开工作台", _show_menu),
-                            ("控制面板", _open_dash),
-                            ("更换模型", _reconfig),
-                            ("修复网关", _fix_gw),
-                            ("复制诊断", _copy_diag),
-                            ("退出", _quit),
+                            ("toggle", "连接网关", _toggle_gw),
+                            ("main", "打开工作台", _show_menu),
+                            ("btn", "控制面板", _open_dash),
+                            ("btn", "重新配置", _reconfig),
+                            ("btn", "修复网关", _fix_gw),
+                            ("quit", "退出", _quit),
                         ])
                         return
                     except Exception as e:
