@@ -53,6 +53,7 @@ TPM_BOTTOMALIGN = 0x0020
 TPM_RETURNCMD = 0x0100
 WM_LBUTTONUP = 0x0202
 WM_RBUTTONUP = 0x0205
+WM_CLOSE = 0x0010
 
 
 class NOTIFYICONDATAW(ctypes.Structure):
@@ -264,8 +265,8 @@ class TrayIcon:
                 # 非阻塞：菜单在子线程弹，动作经主窗口钩子执行
                 AcrylicMenu(self.hwnd, items).show()
                 return
-            except Exception:
-                pass
+            except Exception as e:
+                _dbg("AcrylicMenu 弹窗异常 %r" % e)
         # ---- 回退：原生菜单 ----
         hmenu = user32.CreatePopupMenu()
         user32.SetForegroundWindow(self.hwnd)
@@ -362,11 +363,10 @@ except Exception:
 
 
 def enable_acrylic(hwnd, color=0x880A141E):
-    """系统毛玻璃 backdrop（Win10 用 SetWindowCompositionAttribute Acrylic；Win11 用
-    DwmSetWindowAttribute DWMWA_SYSTEMBACKDROP_TYPE=acrylic；Win11 另附圆角）。
-    返回是否至少一项生效。"""
-    ok = False
-    # ① Win11：系统 backdrop（优先——popup 窗口用平台级 backdrop 最稳）
+    """系统毛玻璃 backdrop。Win11：DwmSetWindowAttribute SYSTEMBACKDROP（成功即主路径，
+    不再叠加老 API——Win11 上 SetWindowCompositionAttribute 会覆盖系统 backdrop）；
+    Win10：才走 SetWindowCompositionAttribute Acrylic。"""
+    # ① Win11：系统 backdrop + 圆角
     try:
         dwm = ctypes.windll.dwmapi
         dwm.DwmSetWindowAttribute.restype = ctypes.c_long
@@ -376,19 +376,18 @@ def enable_acrylic(hwnd, color=0x880A141E):
         r = dwm.DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE,
                                       ctypes.byref(val), ctypes.sizeof(val))
         if r == 0:
-            ok = True
-        # Win11 圆角（popup 需 window corner preference）
-        try:
-            DWMWA_WINDOW_CORNER_PREFERENCE = 33
-            DWMWCP_ROUND = 2
-            r2 = ctypes.c_int(DWMWCP_ROUND)
-            dwm.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
-                                      ctypes.byref(r2), ctypes.sizeof(r2))
-        except Exception:
-            pass
+            try:
+                DWMWA_WINDOW_CORNER_PREFERENCE = 33
+                DWMWCP_ROUND = 2
+                r2 = ctypes.c_int(DWMWCP_ROUND)
+                dwm.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
+                                          ctypes.byref(r2), ctypes.sizeof(r2))
+            except Exception:
+                pass
+            return True
     except Exception:
         pass
-    # ② Win10：accent acrylic（Win11 上此 API 对 popup 常失效，双保险）
+    # ② Win10：accent acrylic
     try:
         accent = _ACCENTPOLICY(AccentState=ACCENT_ENABLE_ACRYLICBLURBEHIND,
                                AccentFlags=2,
@@ -397,26 +396,95 @@ def enable_acrylic(hwnd, color=0x880A141E):
                                             Data=ctypes.cast(ctypes.pointer(accent),
                                                              ctypes.c_void_p),
                                             SizeOfData=ctypes.sizeof(accent))
-        # win10 上有效 → 覆盖 Win11 时该调用无效果也无害
         user32.SetWindowCompositionAttribute(hwnd, ctypes.byref(data))
-        ok = True
+        return True
     except Exception:
         pass
-    return ok
+    return False
 
 
 
 
 
-"""毛玻璃菜单 v2：宿主消息调度（不卡死）+ Layered 半透明绘制（真玻璃质感）"""
-
-
-"""毛玻璃菜单 v3：
-- 真 Acrylic：普通 popup 窗口 + SetWindowCompositionAttribute(ACRYLICBLURBEHIND) + 深色 tint，
-  DWM 提供模糊底色；窗口不画不透明背景，文字/描边用 GDI TRANSPARENT 模式 → 真毛玻璃+清晰文字
-- 动作执行：点击 → PostMessage 宿主(MSG_ACTION) → 主窗口钩子 **再 PostMessage 延迟执行**
-  （避免在 WndProc 栈内同步 evaluate_js → 自锁死锁）
+"""毛玻璃菜单：真 Acrylic 弹窗菜单
+- 真毛玻璃：Win11 DwmSetWindowAttribute(SYSTEMBACKDROP) / Win10 SetWindowCompositionAttribute
+- 类全局只注册一次 + 静态 WndProc（带实例表分发）→ 多次右键不悬空、不叠加、不崩
+- 动作执行：点击 → PostMessage 宿主(MSG_ACTION) → 主窗口钩子 PostMessage 延迟执行
+  （不在 WndProc 栈内同步 evaluate_js → 不卡死）
 """
+
+
+# ---- GDI 函数必须声明参数/返回类型：无 argtypes 时中文 str 传 TextOutW 会 TypeError ----
+user32.BeginPaint.restype = ctypes.c_void_p
+gdi32.SetBkMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+gdi32.SetBkMode.restype = ctypes.c_int
+gdi32.SetTextColor.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+gdi32.SetTextColor.restype = wintypes.DWORD
+gdi32.TextOutW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                           wintypes.LPCWSTR, ctypes.c_int]
+gdi32.TextOutW.restype = wintypes.BOOL
+gdi32.RoundRect.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+gdi32.RoundRect.restype = wintypes.BOOL
+gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+
+WS_EX_NOACTIVATE = 0x08000000
+
+# ctypes.wintypes 没有 PAINTSTRUCT（Python 3.14 确认），必须自定义——否则 _paint 整体失败
+class _PAINTSTRUCT(ctypes.Structure):
+    _fields_ = [("hdc", ctypes.c_void_p),
+                ("fErase", wintypes.BOOL),
+                ("rcPaint", wintypes.RECT),
+                ("fRestore", wintypes.BOOL),
+                ("fIncUpdate", wintypes.BOOL),
+                ("rgbReserved", ctypes.c_byte * 32)]
+
+# ---- 菜单窗口：全局唯一注册 + 静态 WndProc（防止多次弹窗时回调对象被 GC 悬空） ----
+_MENU_CLASS_OK = False
+_MENU_STATIC_PROC = None    # WINFUNCTYPE 全局引用：类注册的 proc 地址依赖它存活
+_MENU_INSTANCES = {}        # int(hwnd) -> 实例
+
+
+def _menu_static_wndproc(hwnd, msg, wparam, lparam):
+    """类注册的唯一窗口过程：按 hwnd 分发到实例；无实例交给系统默认。"""
+    inst = _MENU_INSTANCES.get(int(hwnd))
+    if inst is None:
+        return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+    return inst._wndproc(hwnd, msg, wparam, lparam)
+
+
+def _menu_reg_class():
+    """注册菜单窗口类（进程内只注册一次；已存在(1410)视为成功）。"""
+    global _MENU_CLASS_OK, _MENU_STATIC_PROC
+    if _MENU_CLASS_OK:
+        return True
+    try:
+        if _MENU_STATIC_PROC is None:
+            _MENU_STATIC_PROC = ctypes.WINFUNCTYPE(
+                ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
+                ctypes.c_ssize_t, ctypes.c_ssize_t)(_menu_static_wndproc)
+
+        class WNDCLASSW(ctypes.Structure):
+            _fields_ = [("style", wintypes.UINT), ("lpfnWndProc", ctypes.c_void_p),
+                        ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                        ("hInstance", wintypes.HINSTANCE), ("hIcon", wintypes.HANDLE),
+                        ("hCursor", ctypes.c_void_p), ("hbrBackground", ctypes.c_void_p),
+                        ("lpszMenuName", wintypes.LPCWSTR), ("lpszClassName", wintypes.LPCWSTR)]
+        wc = WNDCLASSW()
+        wc.hInstance = kernel32.GetModuleHandleW(None)
+        wc.lpfnWndProc = ctypes.cast(_MENU_STATIC_PROC, ctypes.c_void_p).value
+        wc.lpszClassName = "OcwGlassMenuV3"
+        wc.hCursor = user32.LoadCursorW(None, ctypes.c_void_p(32649))
+        cls = user32.RegisterClassW(ctypes.byref(wc))
+        if cls or user32.GetLastError() == 1410:
+            _MENU_CLASS_OK = True
+            return True
+        _dbg("菜单类注册失败 last=%s" % user32.GetLastError())
+        return False
+    except Exception as e:
+        _dbg("菜单类注册异常 %r" % e)
+        return False
 
 
 class AcrylicMenu:
@@ -429,7 +497,6 @@ class AcrylicMenu:
     def __init__(self, owner_hwnd, items):
         self.owner = int(owner_hwnd)
         self.items = items
-        self._proc = None
         self._hfont = None
         self._hwnd = None
         self._hover = -1
@@ -444,67 +511,57 @@ class AcrylicMenu:
         return self.WIDTH, h
 
     def _precompute_hits(self):
-        """预计算命中区域（不再依赖 WM_PAINT——透明背景窗口可能无 paint 流程）"""
+        """命中区域预计算（不依赖 WM_PAINT——只要窗口弹出来就能点）"""
         self._hits = []
         y = self.MARGIN
-        for idx, (_l, _f, sep) in enumerate(self.items):
+        for _l, _f, sep in self.items:
             self._hits.append((y, y + self.ITEM_H))
             y += self.ITEM_H + (9 if sep else 0)
 
-
-    def _reg_class(self):
-        class WNDCLASSW(ctypes.Structure):
-            _fields_ = [("style", wintypes.UINT), ("lpfnWndProc", ctypes.c_void_p),
-                        ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
-                        ("hInstance", wintypes.HINSTANCE), ("hIcon", wintypes.HANDLE),
-                        ("hCursor", ctypes.c_void_p), ("hbrBackground", ctypes.c_void_p),
-                        ("lpszMenuName", wintypes.LPCWSTR), ("lpszClassName", wintypes.LPCWSTR)]
-        self._proc = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
-                                        ctypes.c_ssize_t, ctypes.c_ssize_t)(self._wndproc)
-        wc = WNDCLASSW()
-        wc.hInstance = kernel32.GetModuleHandleW(None)
-        wc.lpfnWndProc = ctypes.cast(self._proc, ctypes.c_void_p).value
-        wc.lpszClassName = "OcwGlassMenuV3"
-        wc.hCursor = user32.LoadCursorW(None, ctypes.c_void_p(32649))
-        cls = user32.RegisterClassW(ctypes.byref(wc))
-        if cls:
-            return True
-        try:
-            return user32.GetLastError() == 1410
-        except Exception:
-            return False
-
     def _wndproc(self, hwnd, msg, wparam, lparam):
-        if msg == WM_MOUSEMOVE:
-            y = (int(lparam) >> 16) & 0xFFFF
-            h = self._hit(y)
-            if h != self._hover:
-                self._hover = h
-                user32.InvalidateRect(hwnd, None, True)
-        elif msg == WM_LBUTTONUP:
-            y = (int(lparam) >> 16) & 0xFFFF
-            h = self._hit(y)
-            _dbg("菜单 WM_LBUTTONUP y=%s hit=%d items=%d" % (y, h, len(self.items)))
-            if 0 <= h < len(self.items):
-                try:
-                    user32.PostMessageW(self.owner, MSG_ACTION_FROM_MENU, h, 0)
-                    _dbg("已 post owner msg_action h=%s" % h)
-                except Exception as e:
-                    _dbg("post 失败 %r" % e)
-            user32.DestroyWindow(hwnd)
-        elif msg == WM_KEYDOWN and wparam == 27:
-            user32.DestroyWindow(hwnd)
-        elif msg in (WM_KILLFOCUS,):
-            try:
+        try:
+            if msg == WM_MOUSEMOVE:
+                y = (int(lparam) >> 16) & 0xFFFF
+                h = self._hit(y)
+                if h != self._hover:
+                    self._hover = h
+                    user32.InvalidateRect(hwnd, None, True)
+            elif msg == WM_LBUTTONUP:
+                y = (int(lparam) >> 16) & 0xFFFF
+                h = self._hit(y)
+                _dbg("菜单 WM_LBUTTONUP y=%s hit=%d items=%d" % (y, h, len(self.items)))
+                if 0 <= h < len(self.items):
+                    try:
+                        user32.PostMessageW(self.owner, MSG_ACTION_FROM_MENU, h, 0)
+                        _dbg("已 post owner msg_action h=%s" % h)
+                    except Exception as e:
+                        _dbg("post 失败 %r" % e)
                 user32.DestroyWindow(hwnd)
-            except Exception:
-                pass
-        elif msg == WM_DESTROY:
-            try:
-                if self._hfont:
-                    gdi32.DeleteObject(self._hfont)
-            except Exception:
-                pass
+            elif msg == WM_PAINT:
+                self._paint(hwnd)
+                return 0
+            elif msg == WM_KEYDOWN and wparam == 27:
+                user32.DestroyWindow(hwnd)
+            elif msg == WM_CLOSE:
+                try:
+                    user32.DestroyWindow(hwnd)
+                except Exception:
+                    pass
+            elif msg == WM_KILLFOCUS:
+                try:
+                    user32.DestroyWindow(hwnd)
+                except Exception:
+                    pass
+            elif msg == WM_DESTROY:
+                _MENU_INSTANCES.pop(int(hwnd), None)
+                try:
+                    if self._hfont:
+                        gdi32.DeleteObject(self._hfont)
+                        self._hfont = None
+                except Exception:
+                    pass
+        except Exception as e:
+            _dbg("菜单 _wndproc 异常 msg=0x%04x %r" % (int(msg), e))
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     def _hit(self, y):
@@ -514,44 +571,44 @@ class AcrylicMenu:
         return -1
 
     def _paint(self, hwnd):
-        """透明背景上画：文字（TRANSPARENT）、hover 描边、分隔线。DWM 模糊=背景"""
+        """只画内容（文字/高亮/分隔线），背景交给 DWM blur——GDI 全走 gdi32 且声明 LPCWSTR"""
         try:
-            ps = wintypes.PAINTSTRUCT()
+            ps = _PAINTSTRUCT()
             hdc = user32.BeginPaint(hwnd, ctypes.byref(ps))
-            w, h = self._size()
+            if not hdc:
+                _dbg("菜单 BeginPaint 返回空")
+            w, _h = self._size()
             gdi32.SelectObject(hdc, self._hfont)
-            user32.SetBkMode(hdc, 1)   # TRANSPARENT
-            self._hits = []
+            gdi32.SetBkMode(hdc, 1)   # TRANSPARENT
             y = self.MARGIN
             for idx, (label, fn, sep) in enumerate(self.items):
                 if self._hover == idx:
-                    # hover：圆角描边高亮（弱色，覆盖部分背景但保毛玻璃感）
                     pen = gdi32.CreatePen(0, 1, 0x004A57A0)
                     gdi32.SelectObject(hdc, pen)
-                    user32.RoundRect(hdc, self.MARGIN, y, w - self.MARGIN,
-                                     y + self.ITEM_H, 9, 9)
+                    gdi32.RoundRect(hdc, self.MARGIN, y, w - self.MARGIN,
+                                    y + self.ITEM_H, 9, 9)
                     gdi32.DeleteObject(pen)
-                    user32.SetTextColor(hdc, 0x00A8B7F3)   # 高亮文字（浅蓝）
+                    gdi32.SetTextColor(hdc, 0x00A8B7F3)   # 高亮文字（浅蓝）
                 else:
-                    user32.SetTextColor(hdc, 0xF0E8E4)
-                user32.TextOutW(hdc, self.MARGIN + 14,
-                                y + (self.ITEM_H - 16) // 2, label, len(label))
-                self._hits.append((y, y + self.ITEM_H))
+                    gdi32.SetTextColor(hdc, 0xF0E8E4)
+                gdi32.TextOutW(hdc, self.MARGIN + 14,
+                               y + (self.ITEM_H - 16) // 2, label, len(label))
                 y += self.ITEM_H
                 if sep:
                     pen = gdi32.CreatePen(0, 1, 0xA89897F5)
                     gdi32.SelectObject(hdc, pen)
-                    user32.MoveToEx(hdc, self.MARGIN + 10, y + 4, None)
-                    user32.LineTo(hdc, w - self.MARGIN - 10, y + 4)
+                    gdi32.MoveToEx(hdc, self.MARGIN + 10, y + 4, None)
+                    gdi32.LineTo(hdc, w - self.MARGIN - 10, y + 4)
                     gdi32.DeleteObject(pen)
                     y += 9
             user32.EndPaint(hwnd, ctypes.byref(ps))
-        except Exception:
-            pass
+            _dbg("菜单 WM_PAINT 完成 items=%d hover=%d" % (len(self.items), self._hover))
+        except Exception as e:
+            _dbg("菜单 _paint 异常: %r" % e)
 
     def _thread_show(self):
         try:
-            if not self._reg_class():
+            if not _menu_reg_class():
                 return
             w, h = self._size()
             self._hfont = gdi32.CreateFontW(-13, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0,
@@ -561,24 +618,34 @@ class AcrylicMenu:
             x = max(8, pt.x - w + 8)
             y = max(8, pt.y - h - 12)
             hwnd = user32.CreateWindowExW(
-                0x8 | 0x80,    # WS_EX_TOPMOST | TOOLWINDOW（非 Layered，才能与 DWM blur 共存）
+                0x8 | 0x80 | WS_EX_NOACTIVATE,   # TOPMOST | TOOLWINDOW | NOACTIVATE（非 Layered，与 DWM blur 共存）
                 "OcwGlassMenuV3", "OpenClaw", 0x80000000,   # WS_POPUP
                 x, y, w, h, self.owner, None, kernel32.GetModuleHandleW(None), None)
             if not hwnd:
+                _dbg("菜单 CreateWindowExW 失败")
                 return
             self._hwnd = hwnd
+            _MENU_INSTANCES[int(hwnd)] = self   # 先入表再显示（ShowWindow 派发的消息也能分发）
             self._precompute_hits()
-            # 真 Acrylic：DWM blur + 深色 tint（BGRA: alpha 0x88, 蓝黑 0x0A141E）
+            _dbg("菜单窗口创建 hwnd=%s items=%d" % (int(hwnd), len(self.items)))
+            # 真 Acrylic：Win11 DWM backdrop / Win10 accent（深蓝黑 tint）
             enable_acrylic(hwnd, color=0x880A141E)
             user32.ShowWindow(hwnd, 4)   # SW_SHOWNOACTIVATE
             msg = wintypes.MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))
-        except Exception:
-            pass
+            _dbg("菜单消息泵退出")
+        except Exception as e:
+            _dbg("菜单线程异常 %r" % e)
 
     def show(self):
+        """非阻塞弹菜单；先关掉残留旧菜单（连点右键不叠加）"""
+        for h in list(_MENU_INSTANCES.keys()):
+            try:
+                user32.PostMessageW(h, WM_CLOSE, 0, 0)
+            except Exception:
+                pass
         import threading as _th
         _th.Thread(target=self._thread_show, daemon=True).start()
         return None
