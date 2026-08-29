@@ -8,6 +8,7 @@
 不依赖 pystray（3.14/Win 的 CreateWindow 失败），不用独立消息窗口（消息泵线程绑定问题）。
 """
 import ctypes
+import os
 from ctypes import wintypes
 
 user32 = ctypes.windll.user32
@@ -220,22 +221,30 @@ class TrayIcon:
             if self.on_click:
                 self.on_click()
             return
+        # 毛玻璃自绘菜单（默认关闭——右键稳定性优先；OCW_ACRYLIC_MENU=1 启用，供排错）
+        if os.environ.get("OCW_ACRYLIC_MENU") == "1":
+            try:
+                items = []
+                for idx, (label, fn) in enumerate(self.menu_items):
+                    sep = idx in getattr(self, "_sep_after", [])
+                    items.append((label, fn, sep))
+                fn = AcrylicMenu(self.hwnd, items).show()
+                if fn is not None:
+                    fn()
+                return
+            except Exception:
+                pass
+        # ---- 回退：原生菜单 ----
         hmenu = user32.CreatePopupMenu()
         user32.SetForegroundWindow(self.hwnd)
-        # 菜单简化结构（原生窗口菜单，仅用分隔线分组更整齐）
         MF_STRING = 0x0
         MF_ENABLED = 0x0
         MF_SEPARATOR = 0x800
-        items = self.menu_items
-        # 分组分隔：第0组(打开/面板/更换) 与 第1组(修复/退出)
-        groups = getattr(self, "_menu_groups", [5])  # 默认在索引5后分隔
-        for idx, (label, fn) in enumerate(items):
-            idx_in_menu = idx + 1
-            # 在指定索引之后插入分隔线
+        for idx, (label, fn) in enumerate(self.menu_items):
             if idx in getattr(self, "_sep_after", []):
                 user32.AppendMenuW(hmenu, MF_SEPARATOR, ctypes.c_void_p(0), None)
             user32.AppendMenuW(hmenu, MF_STRING | MF_ENABLED,
-                               ctypes.c_void_p(idx_in_menu), label)
+                               ctypes.c_void_p(idx + 1), label)
         pt = wintypes.POINT()
         user32.GetCursorPos(ctypes.byref(pt))
         sel = user32.TrackPopupMenu(hmenu,
@@ -253,3 +262,252 @@ def create_tray(hwnd, icon_path, tip, on_click=None, menu_items=None):
     t = TrayIcon(hwnd, icon_path, tip, on_click=on_click, menu_items=menu_items)
     ok = t.add()
     return (t, ok)
+
+
+
+"""毛玻璃弹出菜单（自绘，Win10/11 Acrylic 模糊）——作为 tray.py 的追加模块"""
+import ctypes
+from ctypes import wintypes
+
+user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
+gdi32 = ctypes.windll.gdi32
+
+user32.CreateWindowExW.restype = ctypes.c_void_p
+user32.DefWindowProcW.restype = ctypes.c_ssize_t
+user32.DefWindowProcW.argtypes = [ctypes.c_void_p, wintypes.UINT,
+                                  ctypes.c_ssize_t, ctypes.c_ssize_t]
+user32.RegisterClassW.restype = ctypes.c_ushort
+user32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                   wintypes.DWORD, ctypes.c_int, ctypes.c_int,
+                                   ctypes.c_int, ctypes.c_int, wintypes.HWND,
+                                   wintypes.HWND, wintypes.HINSTANCE, ctypes.c_void_p]
+kernel32.GetModuleHandleW.restype = wintypes.HINSTANCE
+user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+gdi32.CreateFontW.restype = ctypes.c_void_p
+gdi32.CreateSolidBrush.restype = ctypes.c_void_p
+gdi32.CreatePen.restype = ctypes.c_void_p
+user32.GetDC.restype = ctypes.c_void_p
+user32.SendMessageW.restype = ctypes.c_ssize_t
+user32.DispatchMessageW.restype = ctypes.c_ssize_t
+user32.GetMessageW.restype = ctypes.c_ssize_t
+
+WS_EX_TOPMOST = 0x8
+WS_EX_TOOLWINDOW = 0x80
+WS_POPUP = 0x80000000
+WS_BORDER = 0x00800000
+WM_MOUSEMOVE = 0x0200
+WM_LBUTTONUP = 0x0202
+WM_KEYDOWN = 0x0100
+WM_KILLFOCUS = 0x0008
+WM_PAINT = 0x000F
+WM_DESTROY = 0x0002
+PS_SOLID = 0
+CLR_INVALID = 0xFFFFFFFF
+
+ACCENT_ENABLE_BLURBEHIND = 3
+ACCENT_ENABLE_ACRYLICBLURBEHIND = 4
+WCA_ACCENT_POLICY = 19
+
+
+class _ACCENTPOLICY(ctypes.Structure):
+    _fields_ = [("AccentState", ctypes.c_uint),
+                ("AccentFlags", ctypes.c_uint),
+                ("GradientColor", ctypes.c_uint),
+                ("AnimationId", ctypes.c_uint)]
+
+
+class _WINDOWCOMPOSITIONATTRIBDATA(ctypes.Structure):
+    _fields_ = [("Attribute", ctypes.c_int),
+                ("Data", ctypes.c_void_p),
+                ("SizeOfData", ctypes.c_size_t)]
+
+
+try:
+    user32.SetWindowCompositionAttribute
+except Exception:
+    pass
+
+
+def enable_acrylic(hwnd, color=0x992E2E45):
+    """Acrylic 模糊（Win10 1803+ / Win11）；失败回退普通窗口"""
+    try:
+        accent = _ACCENTPOLICY(AccentState=ACCENT_ENABLE_ACRYLICBLURBEHIND,
+                               AccentFlags=2,
+                               GradientColor=color)
+        data = _WINDOWCOMPOSITIONATTRIBDATA(Attribute=WCA_ACCENT_POLICY,
+                                            Data=ctypes.cast(ctypes.pointer(accent),
+                                                             ctypes.c_void_p),
+                                            SizeOfData=ctypes.sizeof(accent))
+        user32.SetWindowCompositionAttribute(hwnd, ctypes.byref(data))
+        return True
+    except Exception:
+        return False
+
+
+class AcrylicMenu:
+    """自绘毛玻璃弹出菜单。items: [(label, fn, sep_after_bool)]"""
+    FONT_NAME = "Microsoft YaHei UI,Segoe UI"
+    MARGIN = 12
+    ITEM_H = 34
+    WIDTH = 250
+    BORDER_R = 12
+
+    def __init__(self, owner_hwnd, items):
+        self.owner = int(owner_hwnd)
+        self.items = items
+        self._hits = []
+        self._hover = -1
+        self._proc = None
+        self._hfont = None
+        self._result = None
+
+    def _size(self):
+        h = self.MARGIN * 2
+        for _label, _fn, sep in self.items:
+            h += self.ITEM_H
+            if sep:
+                h += 9
+        return self.WIDTH, h
+
+    def _reg_class(self):
+        class WNDCLASSW(ctypes.Structure):
+            _fields_ = [("style", wintypes.UINT), ("lpfnWndProc", ctypes.c_void_p),
+                        ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                        ("hInstance", wintypes.HINSTANCE), ("hIcon", wintypes.HANDLE),
+                        ("hCursor", ctypes.c_void_p), ("hbrBackground", ctypes.c_void_p),
+                        ("lpszMenuName", wintypes.LPCWSTR), ("lpszClassName", wintypes.LPCWSTR)]
+        self._proc = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
+                                        ctypes.c_ssize_t, ctypes.c_ssize_t)(self._wndproc)
+        wc = WNDCLASSW()
+        wc.hInstance = kernel32.GetModuleHandleW(None)
+        wc.lpfnWndProc = ctypes.cast(self._proc, ctypes.c_void_p).value
+        wc.lpszClassName = "OcwAcrylicMenu"
+        wc.hCursor = user32.LoadCursorW(None, ctypes.c_void_p(32649))
+        try:
+            user32.SetLastError(0)
+        except Exception:
+            pass
+        cls = user32.RegisterClassW(ctypes.byref(wc))
+        if cls:
+            return True
+        # 类已存在（1410）也视为成功
+        try:
+            err = user32.GetLastError()
+            if err == 1410:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _wndproc(self, hwnd, msg, wparam, lparam):
+        if msg == WM_MOUSEMOVE:
+            y = (int(lparam) >> 16) & 0xFFFF
+            h = self._hit(y)
+            if h != self._hover:
+                self._hover = h
+                user32.InvalidateRect(hwnd, None, True)
+        elif msg == WM_LBUTTONUP:
+            y = (int(lparam) >> 16) & 0xFFFF
+            h = self._hit(y)
+            if 0 <= h < len(self.items):
+                self._result = self.items[h][1]
+            user32.DestroyWindow(hwnd)
+        elif msg == WM_KEYDOWN and wparam == 27:  # ESC
+            user32.DestroyWindow(hwnd)
+        elif msg in (WM_KILLFOCUS,):
+            try:
+                user32.DestroyWindow(hwnd)
+            except Exception:
+                pass
+        elif msg == WM_PAINT:
+            self._paint(hwnd)
+        return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def _hit(self, y):
+        for idx, (top, bottom) in enumerate(self._hits):
+            if top <= y <= bottom:
+                return idx
+        return -1
+
+    def _paint(self, hwnd):
+        try:
+            ps = wintypes.PAINTSTRUCT()
+            hdc = user32.BeginPaint(hwnd, ctypes.byref(ps))
+            w, _h = self._size()
+            # 圆角区域裁剪
+            rgn = user32.CreateRoundRectRgn(0, 0, w + 1, _h + 1,
+                                            self.BORDER_R, self.BORDER_R)
+            user32.SelectClipRgn(hdc, rgn)
+            # 背景（毛玻璃已由 DWM 提供，这里画半透明底）
+            bg = gdi32.CreateSolidBrush(0xEB2C2E46 & 0xFFFFFF)
+            user32.FillRect(hdc, ctypes.byref(ps.rcPaint), bg)
+            gdi32.DeleteObject(bg)
+            self._hits = []
+            y = self.MARGIN
+            n = len(self.items)
+            for idx in range(n):
+                label, fn, sep = self.items[idx]
+                if self._hover == idx:
+                    hb = gdi32.CreateSolidBrush(0x30344E60)
+                    gdi32.SelectObject(hdc, hb)
+                    user32.RoundRect(hdc, self.MARGIN, y, w - self.MARGIN,
+                                     y + self.ITEM_H, 9, 9)
+                    gdi32.DeleteObject(hb)
+                gdi32.SelectObject(hdc, self._hfont)
+                user32.SetBkMode(hdc, 1)
+                user32.SetTextColor(hdc, 0xF5E8DC)
+                user32.TextOutW(hdc, self.MARGIN + 14, y + (self.ITEM_H - 16) // 2,
+                                label, len(label))
+                self._hits.append((y, y + self.ITEM_H))
+                y += self.ITEM_H
+                if sep and idx < n - 1:
+                    pen = gdi32.CreatePen(PS_SOLID, 1, 0x55404570)
+                    gdi32.SelectObject(hdc, pen)
+                    user32.MoveToEx(hdc, self.MARGIN + 8, y + 4, None)
+                    user32.LineTo(hdc, w - self.MARGIN - 8, y + 4)
+                    gdi32.DeleteObject(pen)
+                    y += 9
+            user32.DeleteObject(rgn)
+            user32.EndPaint(hwnd, ctypes.byref(ps))
+        except Exception:
+            pass
+
+    def show(self):
+        if not self._reg_class():
+            return None
+        w, h = self._size()
+        self._hfont = gdi32.CreateFontW(-13, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0,
+                                         0, self.FONT_NAME)
+        if not self._hfont:
+            self._hfont = gdi32.CreateFontW(-13, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0,
+                                             0, "Segoe UI")
+        pt = wintypes.POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        x = max(8, pt.x - w + 8)
+        y = max(8, pt.y - h - 12)
+        hwnd = user32.CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            "OcwAcrylicMenu", "OpenClaw", WS_POPUP | WS_BORDER,
+            x, y, w, h, self.owner, None, kernel32.GetModuleHandleW(None), None)
+        if not hwnd:
+            return None
+        enable_acrylic(hwnd)
+        user32.ShowWindow(hwnd, 5)   # SW_SHOW
+        user32.SetForegroundWindow(hwnd)
+        msg = wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+        res = self._result
+        try:
+            if self._hfont:
+                gdi32.DeleteObject(self._hfont)
+        except Exception:
+            pass
+        return res
+
+
+def open_acrylic_menu(owner_hwnd, items):
+    """打开毛玻璃菜单；items=[(label, fn)]；返回被点击的 fn 或 None"""
+    return AcrylicMenu(owner_hwnd, items).show()
