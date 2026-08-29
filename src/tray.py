@@ -252,8 +252,10 @@ class TrayIcon:
             if self.on_click:
                 self.on_click()
             return
-        # 毛玻璃自绘菜单（默认启用；OCW_ACRYLIC_MENU=0 显式回退原生）
-        if os.environ.get("OCW_ACRYLIC_MENU", "1") != "0":
+        # 默认：原生系统菜单（稳定）；OCW_ACRYLIC_MENU=1 才启用毛玻璃自绘菜单
+        _dbg("show_menu items=%d acrylic=%s" % (len(self.menu_items),
+             os.environ.get("OCW_ACRYLIC_MENU", "0")))
+        if os.environ.get("OCW_ACRYLIC_MENU", "0") != "0":
             try:
                 items = []
                 for idx, (label, fn) in enumerate(self.menu_items):
@@ -284,10 +286,11 @@ class TrayIcon:
             TPM_RIGHTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD,
             pt.x, pt.y, 0, self.hwnd, None)
         user32.DestroyMenu(hmenu)
+        _dbg("原生菜单 sel=%s items=%d" % (sel, len(self.menu_items)))
         if sel > 0 and sel - 1 < len(self.menu_items):
             item = self.menu_items[sel - 1]
             if callable(item[1]):
-                item[1]()
+                item[1]()   # 动作已是 gui_exec 入队（pump 消费）→ 永不卡死
 
 
 def create_tray(hwnd, icon_path, tip, on_click=None, menu_items=None):
