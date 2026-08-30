@@ -9,6 +9,7 @@
 """
 import ctypes
 import os
+import threading
 import time
 from ctypes import wintypes
 
@@ -703,6 +704,68 @@ class _SIZEX(ctypes.Structure):
     _fields_ = [("cx", ctypes.c_int), ("cy", ctypes.c_int)]
 
 
+# ============================================================
+# 全局鼠标监听（pynput）：点击面板外部任意位置 → 关闭全部面板
+# 自研 WH_MOUSE_LL 在 pywebview 进程内回调从未被调度（diag 实测 0 回调，
+# mini 复刻却正常——同进程组合下有系统性差异，不再深挖）；
+# pynput 的 win32 实现已在同一进程实测（diag12 端到端关面板成功）。
+# ============================================================
+_pynput_listener = None
+
+
+def _mouse_listen_start():
+    """幂等：首次弹面板时启动；Listener daemon 常驻，点击非面板区域 post WM_CLOSE"""
+    global _pynput_listener
+    if _pynput_listener is not None:
+        return
+    try:
+        from pynput import mouse
+
+        # WindowFromPoint 需要 POINT 按值（x64 用 byref 指针会返回 NULL）
+        user32.WindowFromPoint.argtypes = [wintypes.POINT]
+        user32.WindowFromPoint.restype = wintypes.HWND
+
+        def on_click(x, y, button, pressed):
+            try:
+                if not pressed:
+                    return
+                # DPI 差异：pynput 报物理坐标、面板窗口坐标/WindowFromPoint 可能按逻辑或物理
+                # （进程 awareness 不同）；两种坐标都试——命中面板即算面板内
+                hw = None
+                try:
+                    dpi = user32.GetDpiForSystem() or 96
+                    hw = user32.WindowFromPoint(wintypes.POINT(
+                        int(int(x) * 96 / dpi), int(int(y) * 96 / dpi)))
+                except Exception:
+                    pass
+                if not hw or (hw and int(hw) not in _MENU_INSTANCES):
+                    try:
+                        hw2 = user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+                        if hw2 and int(hw2) in _MENU_INSTANCES:
+                            hw = hw2
+                    except Exception:
+                        pass
+                is_panel = bool(hw) and int(hw) in _MENU_INSTANCES
+                _dbg("pynput click (%s,%s) hw=%s panel=%s items=%d"
+                     % (int(x), int(y), int(hw) if hw else "-", is_panel, len(_MENU_INSTANCES)))
+                if is_panel:
+                    return
+                for h in list(_MENU_INSTANCES.keys()):
+                    try:
+                        user32.PostMessageW(h, WM_CLOSE, 0, 0)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        _pynput_listener = mouse.Listener(on_click=on_click)
+        _pynput_listener.daemon = True
+        _pynput_listener.start()
+        _dbg("pynput 鼠标监听已启动")
+    except Exception as e:
+        _dbg("pynput 监听启动失败 %r" % e)
+
+
 class AcrylicPanel:
     """07 式托盘卡片面板 v2：原版配色（近黑深底+浅灰文字+绿/黄/红状态点+蓝 Toggle+分段卡）
     行结构：标题(白,右侧版本小字) / 状态行(点+文字+addr) / 模型行 / 分隔 / Gateway 卡头+badge /
@@ -757,9 +820,6 @@ class AcrylicPanel:
         self._st_y = y; y += 27
         self._md_y = y; y += 25
         self._sep1 = y - 2; y += 13
-        self._gwhd_y = y; y += 27
-        self._gwbd_y = y; y += 25
-        self._sep2 = y - 2; y += 13
         self._btn_rows = []
         # 按钮网格：main/quit 通栏；btn 双列（落单自动双宽）
         i = 0
@@ -908,38 +968,12 @@ class AcrylicPanel:
             if md:
                 mtxt = "使用模型  ·  " + md
                 gdi32.TextOutW(hdc, m, self._md_y, mtxt, len(mtxt))
-            # ⑤ 分隔线 x2
+            # ⑤ 分隔线
             pen = gdi32.CreatePen(0, 1, self.C_SEP)
             gdi32.SelectObject(hdc, pen)
             gdi32.MoveToEx(hdc, m, self._sep1, None)
             gdi32.LineTo(hdc, w - m, self._sep1)
-            gdi32.MoveToEx(hdc, m, self._sep2, None)
-            gdi32.LineTo(hdc, w - m, self._sep2)
             gdi32.DeleteObject(pen)
-            # ⑥ Gateway 卡头：点 + 标题 + badge
-            b6 = gdi32.CreateSolidBrush(self.C_GOOD)
-            gdi32.SelectObject(hdc, b6)
-            gdi32.Ellipse(hdc, m, self._gwhd_y + 6, m + 10, self._gwhd_y + 16)
-            gdi32.DeleteObject(b6)
-            gdi32.SelectObject(hdc, self._hfont)
-            gdi32.SetTextColor(hdc, self.C_TXT)
-            gwt = "Gateway"
-            gdi32.TextOutW(hdc, m + 18, self._gwhd_y, gwt, len(gwt))
-            bdg = self.spec.get("badge", "")
-            if bdg:
-                gdi32.SelectObject(hdc, self._hfont_s)
-                sz = _SIZEX()
-                gdi32.GetTextExtentPoint32W(hdc, bdg, len(bdg), ctypes.byref(sz))
-                self._fill_rect(hdc, w - m - sz.cx - 12, self._gwhd_y,
-                                w - m, self._gwhd_y + 17, self.C_BADGE_BG, 12)
-                gdi32.SetTextColor(hdc, 0xD4CBC9)
-                gdi32.TextOutW(hdc, w - m - sz.cx - 6, self._gwhd_y + 1, bdg, len(bdg))
-            # ⑦ 卡体行
-            gdi32.SelectObject(hdc, self._hfont_s)
-            gdi32.SetTextColor(hdc, self.C_SUB)
-            body = self.spec.get("node", "")
-            atxt = "%s  ·  %s" % (addr or "?", body)
-            gdi32.TextOutW(hdc, m + 18, self._gwbd_y, atxt, len(atxt))
             # ⑧ 按钮
             gdi32.SelectObject(hdc, self._hfont)
             for (x0, y0, x1, y1, kind, ai) in self._btn_rows:
@@ -1004,6 +1038,7 @@ class AcrylicPanel:
             _MENU_INSTANCES[int(hwnd)] = self
             _dbg("面板 v2 创建 hwnd=%s btns=%d h=%d" % (int(hwnd), len(self._btn_rows), self._h))
             user32.ShowWindow(hwnd, 4)   # SW_SHOWNOACTIVATE
+            _mouse_listen_start()
             msg = wintypes.MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
                 user32.TranslateMessage(ctypes.byref(msg))
@@ -1097,10 +1132,8 @@ class AcrylicSessionList:
                 y += self.ROW_H + 4
                 i += 1
             elif kind == "btn":
-                half = int((self.WIDTH - 2 * m - self.BTN_GAP) / 2)
-                self._rows.append((m, y, m + half, y + self.BTN_H, "btn", i))
-                self._rows.append((m + half + self.BTN_GAP, y, self.WIDTH - m,
-                                   y + self.BTN_H, "btn", i))
+                # 全宽按钮（动作唯一；双列重复渲染是 bug）
+                self._rows.append((m, y, self.WIDTH - m, y + self.BTN_H, "btn", i))
                 y += self.BTN_H + self.BTN_GAP
                 i += 1
         self._h = y + 16
@@ -1301,6 +1334,7 @@ class AcrylicSessionList:
             _MENU_INSTANCES[int(hwnd)] = self
             _dbg("会话栏创建 hwnd=%s rows=%d h=%d" % (int(hwnd), len(self._rows), self._h))
             user32.ShowWindow(hwnd, 4)   # SW_SHOWNOACTIVATE
+            _mouse_listen_start()
             msg = wintypes.MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
                 user32.TranslateMessage(ctypes.byref(msg))

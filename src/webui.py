@@ -1762,7 +1762,6 @@ def main():
                         "status": st, "status_text": stt,
                         "addr": "127.0.0.1:%s" % api._gateway_port(),
                         "model": api._model_display(),
-                        "badge": "Local", "node": "本机 1 节点",
                         "sessions_right": _sessions_summary()}
 
             _tray_obj = None
@@ -1780,7 +1779,6 @@ def main():
                         return fn
                     for d in data[:7]:
                         actions.append(("row", d.get("label") or "会话", _mk(d.get("key"), d)))
-                    actions.append(("btn", "打开官方会话页", _open_dash))
                     _tray.open_session_panel(_hwnd, {"title": "Sessions", "list": data}, actions)
                 except Exception as e:
                     wrb_log("[tray] 会话面板异常，回退: %r" % e)
