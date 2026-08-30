@@ -98,17 +98,22 @@ MSG_ACTION_EXEC = 0x401 + 102   # 延迟执行（务必离开 WndProc 栈再跑 
 def _hook_proc(hwnd, msg, wparam, lparam):
     """宿主 WndProc：托盘 WM_USER+100 分发；菜单动作 WM_USER+101 先缓存，PostMessage 延迟执行"""
     if msg == MSG_ACTION_FROM_MENU and _ACTIVE:
-        _dbg("hook 收到 MSG_ACTION wparam=%s" % wparam)
-        user32.PostMessageW(hwnd, MSG_ACTION_EXEC, wparam, 0)
+        _dbg("hook 收到 MSG_ACTION wparam=%s lparam=%s" % (wparam, int(lparam)))
+        # lparam=面板 hwnd：EXEC 按实例表分发（双面板并存动作不错位）；0=旧菜单/回退全局表
+        user32.PostMessageW(hwnd, MSG_ACTION_EXEC, wparam, lparam)
         return 0
     if msg == MSG_ACTION_EXEC and _ACTIVE:
         try:
             idx = int(wparam)
-            _dbg("hook 收到 MSG_ACTION_EXEC idx=%s items=%d" % (idx, len(_MENU_ITEMS)))
-            if 0 <= idx < len(_MENU_ITEMS):
+            inst = _MENU_INSTANCES.get(int(lparam))
+            fn = None
+            if inst is not None and hasattr(inst, "actions") and 0 <= idx < len(inst.actions):
+                fn = inst.actions[idx][2]
+                _dbg("hook EXEC(p%d) idx=%s" % (int(lparam) & 0xFFFF, idx))
+            elif 0 <= idx < len(_MENU_ITEMS):
                 fn = _MENU_ITEMS[idx][1]
-                if callable(fn):
-                    fn()
+            if callable(fn):
+                fn()
         except Exception:
             pass
         return 0
@@ -811,10 +816,13 @@ class AcrylicPanel:
                 _dbg("面板 v2 WM_LBUTTONUP x=%d y=%d hit=%d" % (x, y, h))
                 if 0 <= h < len(self.actions):
                     try:
-                        user32.PostMessageW(self.owner, MSG_ACTION_FROM_MENU, h, 0)
-                        _dbg("面板 v2 已 post owner msg_action h=%s" % h)
+                        user32.PostMessageW(self.owner, MSG_ACTION_FROM_MENU, h, int(hwnd))
+                        _dbg("面板 v2 已 post owner msg_action h=%s (带面板 hwnd)" % h)
                     except Exception as e:
                         _dbg("面板 v2 post 失败 %r" % e)
+                    # row（Sessions）点击：保留主面板——列表在旁边新开（并排）
+                    if self.actions[h][0] == "row":
+                        return 0
                 user32.DestroyWindow(hwnd)
             elif msg == WM_PAINT:
                 self._paint(hwnd)
@@ -822,8 +830,6 @@ class AcrylicPanel:
             elif msg == WM_KEYDOWN and wparam == 27:
                 user32.DestroyWindow(hwnd)
             elif msg == WM_CLOSE:
-                user32.DestroyWindow(hwnd)
-            elif msg == WM_KILLFOCUS:
                 user32.DestroyWindow(hwnd)
             elif msg == WM_DESTROY:
                 _MENU_INSTANCES.pop(int(hwnd), None)
@@ -988,7 +994,7 @@ class AcrylicPanel:
             x = max(8, pt.x - w + 8)
             y = max(8, pt.y - h - 12)
             hwnd = user32.CreateWindowExW(
-                0x8 | 0x80,   # TOPMOST | TOOLWINDOW（不加 NOACTIVATE——激活后失焦即关）
+                0x8 | 0x80 | WS_EX_NOACTIVATE,   # TOPMOST | TOOLWINDOW | NOACTIVATE（不抢焦点，与列表面板并存）
                 "OcwPanelV1", "OpenClaw", 0x80000000,   # WS_POPUP
                 x, y, w, h, None, None, kernel32.GetModuleHandleW(None), None)
             if not hwnd:
@@ -997,11 +1003,7 @@ class AcrylicPanel:
             self._hwnd = hwnd
             _MENU_INSTANCES[int(hwnd)] = self
             _dbg("面板 v2 创建 hwnd=%s btns=%d h=%d" % (int(hwnd), len(self._btn_rows), self._h))
-            user32.ShowWindow(hwnd, 5)
-            try:
-                user32.SetForegroundWindow(hwnd)
-            except Exception:
-                pass
+            user32.ShowWindow(hwnd, 4)   # SW_SHOWNOACTIVATE
             msg = wintypes.MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
                 user32.TranslateMessage(ctypes.byref(msg))
@@ -1131,8 +1133,8 @@ class AcrylicSessionList:
                 _dbg("会话栏 WM_LBUTTONUP x=%d y=%d hit=%d" % (x, y, h))
                 if 0 <= h < len(self.actions):
                     try:
-                        user32.PostMessageW(self.owner, MSG_ACTION_FROM_MENU, h, 0)
-                        _dbg("会话栏已 post owner msg_action h=%s" % h)
+                        user32.PostMessageW(self.owner, MSG_ACTION_FROM_MENU, h, int(hwnd))
+                        _dbg("会话栏已 post owner msg_action h=%s (带面板 hwnd)" % h)
                     except Exception as e:
                         _dbg("会话栏 post 失败 %r" % e)
                 user32.DestroyWindow(hwnd)
@@ -1142,8 +1144,6 @@ class AcrylicSessionList:
             elif msg == WM_KEYDOWN and wparam == 27:
                 user32.DestroyWindow(hwnd)
             elif msg == WM_CLOSE:
-                user32.DestroyWindow(hwnd)
-            elif msg == WM_KILLFOCUS:
                 user32.DestroyWindow(hwnd)
             elif msg == WM_DESTROY:
                 _MENU_INSTANCES.pop(int(hwnd), None)
@@ -1268,13 +1268,31 @@ class AcrylicSessionList:
                 return
             self._calc()
             self._font()
-            pt = wintypes.POINT()
-            user32.GetCursorPos(ctypes.byref(pt))
             w, h = self._w, self._h
-            x = max(8, pt.x - w + 8)
-            y = max(8, pt.y - h - 12)
+            # 锚定主面板左侧并排（07 样式）；无主面板/放不下时按光标侧弹
+            class _RECT(ctypes.Structure):
+                _fields_ = [("l", ctypes.c_long), ("t", ctypes.c_long),
+                            ("r", ctypes.c_long), ("b", ctypes.c_long)]
+            x = y = None
+            try:
+                user32.GetWindowRect.restype = wintypes.BOOL
+                main_hwnd = user32.FindWindowW("OcwPanelV1", None)
+                if main_hwnd:
+                    rc = _RECT()
+                    if user32.GetWindowRect(main_hwnd, ctypes.byref(rc)):
+                        x = rc.l - w - 8
+                        y = rc.t
+                        if x < 8:
+                            x = rc.r + 8
+            except Exception:
+                pass
+            if x is None:
+                pt = wintypes.POINT()
+                user32.GetCursorPos(ctypes.byref(pt))
+                x = max(8, pt.x - w + 8)
+                y = max(8, pt.y - h - 12)
             hwnd = user32.CreateWindowExW(
-                0x8 | 0x80, "OcwPanelV2", "OpenClaw", 0x80000000,
+                0x8 | 0x80 | WS_EX_NOACTIVATE, "OcwPanelV2", "OpenClaw", 0x80000000,
                 x, y, w, h, None, None, kernel32.GetModuleHandleW(None), None)
             if not hwnd:
                 _dbg("会话栏 CreateWindowExW 失败")
@@ -1282,11 +1300,7 @@ class AcrylicSessionList:
             self._hwnd = hwnd
             _MENU_INSTANCES[int(hwnd)] = self
             _dbg("会话栏创建 hwnd=%s rows=%d h=%d" % (int(hwnd), len(self._rows), self._h))
-            user32.ShowWindow(hwnd, 5)
-            try:
-                user32.SetForegroundWindow(hwnd)
-            except Exception:
-                pass
+            user32.ShowWindow(hwnd, 4)   # SW_SHOWNOACTIVATE
             msg = wintypes.MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
                 user32.TranslateMessage(ctypes.byref(msg))
@@ -1296,9 +1310,17 @@ class AcrylicSessionList:
             _dbg("会话栏线程异常 %r" % e)
 
     def show(self):
+        """并排模式：保留主面板 OcwPanelV1（列表在它旁边新开），只清理旧列表面板"""
+        try:
+            user32.GetClassNameW.restype = ctypes.c_int
+            user32.GetClassNameW.argtypes = [wintypes.HWND, ctypes.c_void_p, ctypes.c_int]
+        except Exception:
+            pass
         for h in list(_MENU_INSTANCES.keys()):
             try:
-                user32.PostMessageW(h, WM_CLOSE, 0, 0)
+                buf = ctypes.create_unicode_buffer(64)
+                if user32.GetClassNameW(h, buf, 64) and "OcwPanelV2" in buf.value:
+                    user32.PostMessageW(h, WM_CLOSE, 0, 0)
             except Exception:
                 pass
         import threading as _th

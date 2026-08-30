@@ -2,23 +2,14 @@
 
 ## 🔴 明日首要（2026-09-01 用户实测反馈，需修复）
 
-### 问题1：左键点击托盘，主窗口无法显示（任务栏有缩略预览但窗口不可见）
-- 现象：左键托盘 → 任务栏出现"OpenClaw 工…"缩略图/预览，但主窗口不显示（截图证实窗口在任务栏、内容无法弹出）
-- 涉及：TrayIcon on_click → `_show_menu` → `api._gui_exec(win.restore(), win.show())`（webui.py tray 段）
-- 线索（明天排查顺序）：
-  - 疑似 pywebview 窗口处于隐藏状态时 restore/show 顺序或 `win.hide()`（launch_usage 面板流程会 hide 主窗）与托盘恢复的竞态
-  - 用 workbench.log / tray-debug.log 打点验证 `_show_menu` 动作是否被执行、pump 是否消费
-  - 候选修复：show 前 SetForegroundWindow/SetWindowPos 强制还原；或 restore→hide→show 顺序；或 win.show() 后 `win.evaluate_js("")` 触达确认；必要时直查 WinForms 窗口状态（IsVisible/WindowState）
-- 参考：对话中曾因 evaluate_js 主线程自锁修复过类似"未响应/不显示"；本次不是死锁（程序活着），是窗口可见性路径问题
+### 问题1：左键点击托盘，主窗口无法显示（✅ 2026-09-01 已修复+防御加固）
+- 修复：`_show_menu` 双保险——pywebview restore/show + Win32 直调 SW_RESTORE(9)/SW_SHOWNORMAL(1) + SetForegroundWindow；前后状态写 wrb_log（再失败可拿日志定位）
+- diag8 实测：正常/hide/最小化三场景 restore+show 均恢复（模拟环境未复现原 bug，故按防御性修复）
 
-### 问题2：Sessions 面板点击后要在主面板旁边新开（同时显示，07 原版样式）
-- 期望：点击主面板 Sessions 行 → 列表面板出现在**主面板左侧/右侧并排**（07 截图样式：两张卡同时可见），而不是替换消失
-- 改动点（tray.py）：
-  - AcrylicPanel._wndproc：kind=="row" 点击后**不 DestroyWindow**（保留主面板），仅 post action；其余 kind 维持原行为
-  - AcrylicSessionList.show(keep_existing=True)：不清残留其他面板；窗口定位 = 主面板 GetWindowRect 左侧 - 列表宽 - 8
-  - 列表内点击会话行/返回：销毁列表自身，主面板保留
-  - 空闲时点击面板外部（主面板 KILLFOCUS）→ 两面板都收尾（或点主面板非交互区时保持）
-- 注意：_MENU_INSTANCES 实例表机制已支持多窗口并存（静态 proc 按 hwnd 分发），无需大改
+### 问题2：Sessions 面板并排新开（✅ 2026-09-01 已修复）
+- 实现：row 点击保留主面板；列表面板锚定主面板左侧 -8px 并排（放不下自动右侧）；两面板均 WS_EX_NOACTIVATE + SW_SHOWNOACTIVATE（无焦点互抢/无 KILLFOCUS 误关）；列表行点击=自关+保留主面板
+- **动作按实例分发**：MSG_ACTION 消息 lparam 携带面板 hwnd → EXEC 查 `_MENU_INSTANCES` 实例表（转发时曾丢 lparam 导致动作串台——已修）；0=旧菜单/全局表兼容
+- diag9/10 实测：并排双窗口✓ row 点击保留✓ 列表行点击后主面板仍在✓ 实例分发不串✓ 退出自关✓
 
 
 ## 🔴 明日首要：打包验证（沙盒）

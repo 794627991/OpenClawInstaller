@@ -1594,7 +1594,33 @@ def main():
             import tray as _tray
             ico_path = _icon_path()
             def _show_menu():
-                api._gui_exec(lambda: (win.restore(), win.show()))
+                """左键托盘 → 主窗口显示。
+                restore+show 双保险：Win32 直调 SW_RESTORE/SW_SHOWNORMAL + 强制前台；
+                并记录前后状态（wrb_log 留证——用户反馈过"任务栏有预览但不显示"）"""
+                def _run():
+                    try:
+                        before = "?"
+                        try:
+                            n = win.native
+                            before = "V=%s W=%s" % (n.Visible, n.WindowState)
+                        except Exception:
+                            pass
+                        win.restore()
+                        win.show()
+                        try:
+                            import ctypes as _c
+                            u = _c.windll.user32
+                            u.ShowWindow.restype = _c.c_int
+                            h = win.native.Handle.ToInt64()
+                            u.ShowWindow(h, 9)          # SW_RESTORE（最小化/隐藏态直还原）
+                            u.ShowWindow(h, 1)          # SW_SHOWNORMAL（visible 兜底）
+                            u.SetForegroundWindow(h)     # 强置前台（Win11 限制时无害）
+                        except Exception:
+                            pass
+                        wrb_log("[tray] 左键显示主窗 (before=%s) OK" % before)
+                    except Exception as e:
+                        wrb_log("[tray] 左键显示主窗异常: %r" % e)
+                api._gui_exec(_run)
             def _open_dash():
                 try:
                     api.launch_usage()
