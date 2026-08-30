@@ -1140,8 +1140,6 @@ class AcrylicSessionList:
         self._hdr_y = y; y += 30
         self._sep1 = y - 2; y += 11
         self._rows = []
-        self._rows.append((m, y, self.WIDTH - m, y + self.BTN_H, "back", 0))
-        y += self.BTN_H + 4
         n = min(len(self._list()), self.MAX_ROWS)
         for i in range(n):
             self._rows.append((m, y, self.WIDTH - m, y + self.ROW_H, "row", 1000 + i))
@@ -1176,14 +1174,7 @@ class AcrylicSessionList:
                 x, y = int(lparam) & 0xFFFF, (int(lparam) >> 16) & 0xFFFF
                 h = self._hit(x, y)
                 _dbg("会话栏 WM_LBUTTONUP x=%d y=%d hit=%d" % (x, y, h))
-                if h >= 0 and h < len(self.actions):
-                    try:
-                        user32.PostMessageW(self.owner, MSG_ACTION_FROM_MENU, h, int(hwnd))
-                    except Exception as e:
-                        _dbg("会话栏 post 失败 %r" % e)
-                    user32.DestroyWindow(hwnd)
-                    return 0
-                elif h >= 1000:
+                if h >= 1000:
                     # 会话行 → on_row(i)（EXEC 处理器分发）
                     try:
                         user32.PostMessageW(self.owner, MSG_ACTION_FROM_MENU, h, int(hwnd))
@@ -1252,21 +1243,7 @@ class AcrylicSessionList:
             # 行
             idx = 0
             for (x0, y0, x1, y1, kind, val) in self._rows:
-                if kind == "back":
-                    label = self.actions[0][1] if self.actions else "返回"
-                    hv = self._hover == 0
-                    bg = self.C_BTN_HOVER if hv else self.C_BTN
-                    brush = gdi32.CreateSolidBrush(bg)
-                    gdi32.SelectObject(hdc, brush)
-                    gdi32.RoundRect(hdc, x0, y0, x1, y1, 18, 18)
-                    gdi32.DeleteObject(brush)
-                    gdi32.SelectObject(hdc, self._hfont)
-                    gdi32.SetTextColor(hdc, 0xD0D2DA)
-                    sz = _SIZEX()
-                    gdi32.GetTextExtentPoint32W(hdc, label, len(label), ctypes.byref(sz))
-                    gdi32.TextOutW(hdc, (x0 + x1 - sz.cx) // 2,
-                                   y0 + (y1 - y0 - sz.cy) // 2, label, len(label))
-                elif kind == "row" and idx < len(lst):
+                if kind == "row" and idx < len(lst):
                     d = lst[idx]
                     idx += 1
                     if self._hover == val:
@@ -1316,7 +1293,7 @@ class AcrylicSessionList:
                 gdi32.SelectObject(hdc, self._hfont)
                 gdi32.SetTextColor(hdc, self.C_WEAK)
                 msg_txt = "正在获取会话…" if self.spec.get("loading") else "暂无会话（过去 24 小时）"
-                gdi32.TextOutW(hdc, m, self._hdr_y + 70, msg_txt, len(msg_txt))
+                gdi32.TextOutW(hdc, m, self._hdr_y + 56, msg_txt, len(msg_txt))
             user32.EndPaint(hwnd, ctypes.byref(ps))
             _dbg("会话栏 v2 WM_PAINT 完成 rows=%d items=%d" % (len(self._rows), len(lst)))
         except Exception:
