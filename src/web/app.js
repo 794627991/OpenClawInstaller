@@ -59,6 +59,7 @@ function initMouseTrail() {
   // 只有鼠标移动时才运行动画（静止即停，省 CPU）
   let running = false, rafId = null;
   function frame() {
+    if (document.hidden) { running = false; rafId = null; return; }  // 隐藏即停（CPU 降载）
     let moved = false;
     dots.forEach(t => {
       const nx = t.x + (tx - t.x) * t.speed;
@@ -80,6 +81,16 @@ function initMouseTrail() {
     if (!running) { running = true; rafId = requestAnimationFrame(frame); }
   }
   document.addEventListener("mousemove", e => { tx = e.clientX; ty = e.clientY; start(); });
+}
+
+/* ---------- 性能：窗口失焦/隐藏时降载 ----------
+   WebView2 软件渲染下：无限 CSS 动画 + 卡片 backdrop-filter 毛玻璃 都是 CPU 大头。
+   失焦（后台/被任务管理器遮挡）即冻结全部动画、隐藏光斑、关闭毛玻璃——聚焦即时恢复 */
+function initIdleDetect() {
+  const set = idle => document.body.classList.toggle("idle", idle);
+  document.addEventListener("visibilitychange", () => set(document.hidden));
+  window.addEventListener("blur", () => set(true));
+  window.addEventListener("focus", () => set(false));
 }
 
 /* ---------- 页面切换 ---------- */
@@ -552,6 +563,7 @@ document.addEventListener("DOMContentLoaded", () => {
   injectIcons();    // 注入普通图标
   initHeroLogo();   // hero 龙虾（emoji 优先，系统不支持才 SVG）
   initMouseTrail();
+  initIdleDetect(); // 失焦/隐藏降载（WebView2 软渲染 CPU 大头）
   initLogModal();
   // 首页：未安装 → 开始检测
   $("btn-start").onclick = () => {
