@@ -175,6 +175,8 @@ function currentTheme() {
 function applyPalette(paletteId) {
   const vars = PALETTE_VARS[paletteId] || PALETTE_VARS["default"];
   const root = document.documentElement;
+  // 审计 5.1：先清掉上个调色板的全部变量（亮色→暗色切换残留 --title-color 等导致低对比度）
+  Object.values(PALETTE_VARS).forEach(v => Object.keys(v).forEach(k => root.style.removeProperty(k)));
   Object.entries(vars).forEach(([k, v]) => root.style.setProperty(k, v));
   try { localStorage.setItem("ocw-palette", paletteId); } catch (e) {}
 }

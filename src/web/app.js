@@ -108,7 +108,7 @@ function toast(text, ok) {
   // ok 为 true/false 表示完成态（3.5s）；undefined 表示进行中（8s）
   el.className = "toast " + (ok === false ? "toast-bad" : "toast-ok");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.style.display = "none"; }, ok === undefined ? 8000 : 3500);
+  toastTimer = setTimeout(() => { el.style.display = "none"; }, ok == null ? 8000 : 3500);
 }
 
 /* ---------- 启动器首页 ---------- */
@@ -335,7 +335,7 @@ function startInstall() {
 
 let configMode = "install";   // install=安装流程（无返回） / reconfig=启动器更换模型（有返回）
 let keyVerified = false;      // API Key 验证是否通过（通过才允许下一步）
-let verifyToken = "";         // 验证请求指纹（换服务商/改Key 后过期）
+let verifyToken = "init" + Math.random().toString(36).slice(2);  // 验证请求指纹（审计：空串会被 token="" 的伪造 done 匹配）
 
 function goConfig(mode) {
   configMode = mode || "install";

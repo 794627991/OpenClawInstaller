@@ -437,8 +437,9 @@ class Api:
                 except Exception:
                     pass
                 self.push_log("  服务脚本完整，正在自动启动网关（第 %d 次尝试）..." % self._auto_tries)
-                core.run_cmd(claw_cmd() + " gateway start",
-                             callback=self.push_log, timeout=40)
+                with self._gw_lock:   # 与 launch/fix 互斥（防 stop 杀 start 自相残杀）
+                    core.run_cmd(claw_cmd() + " gateway start",
+                                 callback=self.push_log, timeout=40)
                 time.sleep(3)
             finally:
                 self._auto_starting = False
@@ -1019,7 +1020,13 @@ class Api:
             self.push_done("config", False, None)
             return
         self.push_log("\n📌 正在重新配置 AI 模型 (%s)..." % pid)
-        if not key:
+        # 本地模型（Ollama/LM Studio）无需 API Key（与 _apply_config 的 needs_key 逻辑一致）
+        needs_key = True
+        for p in core.PROVIDERS:
+            if p[0] == pid:
+                needs_key = bool(p[5])
+                break
+        if not key and needs_key:
             self.push_log("\n⚠️ 未填入 API Key（配置未执行）")
             self.push_done("config", False, None)
             return
@@ -1041,8 +1048,10 @@ class Api:
                 auth_choice, key_param = p[3], p[4]
                 # 普通 provider：auth-choice + key 参数（key 可空——本地模型）
                 if auth_choice and key_param:
+                    # shell 转义：双引号/反引号/美元符（防命令破坏/注入）
+                    esc_key = key.replace('"', '\\"').replace('`', '\\`').replace('$', '\\$')
                     return '%s --auth-choice %s %s "%s" --gateway-bind loopback --install-daemon --daemon-runtime node' % (
-                        base, auth_choice, key_param, key)
+                        base, auth_choice, key_param, esc_key)
                 # 本地 provider（ollama/lmstudio）：仅 auth-choice（onboard 官方支持该值），无 key_param
                 if auth_choice:
                     return '%s --auth-choice %s --gateway-bind loopback --install-daemon --daemon-runtime node' % (
@@ -1081,12 +1090,14 @@ class Api:
             self.push_log("  [演练模式] 跳过执行: openclaw gateway install")
             ret = 0
         else:
-            ret = core.run_cmd(claw_cmd() + " gateway install", callback=self.push_log)
+            with self._gw_lock:   # 与 launch/fix/auto 互斥（审计：原绕过锁——网关命令自相残杀）
+                ret = core.run_cmd(claw_cmd() + " gateway install", callback=self.push_log)
         self.push_log("  ✅ 守护进程已安装" if ret == 0 else "  ⚠️ 失败（返回码: %s），稍后可手动运行" % ret)
         results.append(("安装守护进程", ret))
 
         self.push_log("\n📌 Step 3/5: 启动 Gateway...")
-        ret = core.run_cmd(claw_cmd() + " gateway start", callback=self.push_log)
+        with self._gw_lock:
+            ret = core.run_cmd(claw_cmd() + " gateway start", callback=self.push_log)
         self.push_log("  ✅ Gateway 已启动" if ret == 0 else "  ⚠️ 失败（返回码: %s）" % ret)
         results.append(("启动 Gateway", ret))
 
@@ -1638,7 +1649,7 @@ def main():
                     win.evaluate_js("goConfig('reconfig')")))
             def _quit():
                 try:
-                    global _tray_obj
+                    nonlocal _tray_obj
                     _tray_obj.destroy()
                 except Exception:
                     pass
@@ -1787,17 +1798,32 @@ def main():
                     _tray.open_session_panel(_hwnd, spec, [("main", "返回工作台", _panel_route)])
                     if data is None:
                         def run():
-                            rows = _load_sessions(force=True) or []
-                            if rows:
-                                spec["list"] = rows
-                                spec["loading"] = False
-                                hm = _tray.menu_find("OcwPanelV2")
-                                if hm:
-                                    try:
-                                        import ctypes as _ct
-                                        _ct.windll.user32.PostMessageW(hm, 0x401, 0, 0)
-                                    except Exception:
-                                        pass
+                            # 审计中-2：loading 守卫使 force 返回 None → 面板永久"正在获取会话…"。
+                            # 修复：等已有加载完成（轮询 data），有数据才 post 刷新；失败也解除 loading
+                            for _ in range(120):
+                                rows = _sessions_cache.get("data")
+                                if rows is not None:
+                                    spec["list"] = rows
+                                    spec["loading"] = False
+                                    hm = _tray.menu_find("OcwPanelV2")
+                                    if hm:
+                                        try:
+                                            import ctypes as _ct
+                                            _ct.windll.user32.PostMessageW(hm, 0x401, 0, 0)
+                                        except Exception:
+                                            pass
+                                    return
+                                if not _sessions_cache.get("loading"):
+                                    _load_sessions(force=True)
+                                time.sleep(0.5)
+                            spec["loading"] = False   # 超时兜底：解除永久加载态
+                            hm = _tray.menu_find("OcwPanelV2")
+                            if hm:
+                                try:
+                                    import ctypes as _ct
+                                    _ct.windll.user32.PostMessageW(hm, 0x401, 0, 0)
+                                except Exception:
+                                    pass
                         threading.Thread(target=run, daemon=True).start()
                 except Exception as e:
                     wrb_log("[tray] 会话面板异常，回退: %r" % e)
