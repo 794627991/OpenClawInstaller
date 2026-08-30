@@ -1,5 +1,36 @@
 # 🦞 OpenClaw 一键安装器 - 待办事项
 
+## 🔷 对抗审计结果（2026-09-01，4 子代理 x 已修 12 个真实 bug）
+
+### ✅ 已修复（commit 6452003）
+1. GDI 泄漏（每次重绘 12-16 对象，700 次弹窗耗尽）→ 换出 DC 再删
+2. 面板自毁后动作丢失竞态（双面板并存主面板按钮全死）→ _MENU_ACTION_MAP 独立动作表
+3. 退出 _quit global NameError（幽灵托盘图标）→ nonlocal
+4. 更换模型本地服务商死路 → 对齐 _apply_config 豁免
+5. 会话面板永久"正在获取会话…" → 轮询等待+超时兜底
+6. 面板线程泄漏（每弹一次阻塞线程）→ WM_DESTROY PostQuitMessage
+7. _MENU_STATIC_PROC 懒初始化 AV 竞态 → 模块级创建
+8. _paint 异常跳 EndPaint（WM_PAINT 风暴）→ _paint_impl + try/finally
+9. 网关命令绕过 _gw_lock → 全部加锁
+10. API Key shell 注入 → 转义
+11. verifyToken 空串伪造验证通过 → 随机初值
+12. 主题变量残留 / 进行中 toast 被当完成态
+
+### ⏳ 已知未修（记录在案）
+- [ ] 目录选择对话框阻塞 pump 线程（120s 无事件推送）——需独立线程+回传改造
+- [ ] 主窗口 URL 白名单（纵深防御，当前无导航向量）
+- [ ] tkinter 版遗留 7 项（7.1 UI 线程阻塞/7.2 DRY_RUN 缺失/…）——入口已是 webui，废弃时整体删
+- [ ] _open_dashboard_window check-then-create 竞态（双击开两个面板窗）
+- [ ] _pynput_listener 初始化失败后永不重试
+- [ ] hwnd 复用使 WM_CLOSE 命中新窗口（低概率）
+- [ ] 右键面板时 _panel_spec 同步网络探测阻塞 UI 线程（可改异步）
+- [ ] diag 模式 taskkill /IM node.exe 无差别杀进程（改 PID 过滤）
+
+### 📊 审计误报/降级记录
+- "会话行点击必死"（两代理一致断言）：GIL 调度恰好保护（diag 实测全过），但竞态真实存在，已根治
+- XSS 防护：核查完整（全 textContent + escapeHtml 正确），无漏洞
+- Anthropic 验证 body 硬编码 gpt-4o-mini：实为兼容端点探测（Anthropic 兼容接口不校验 model 字段），非 bug
+
 ## 🔴 明日首要（2026-09-01 用户实测反馈，需修复）
 
 ### 问题1：左键点击托盘，主窗口无法显示（✅ 2026-09-01 已修复+防御加固）
