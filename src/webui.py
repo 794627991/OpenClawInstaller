@@ -1766,23 +1766,41 @@ def main():
 
             _tray_obj = None
             def _open_sessions_panel():
-                """打开会话列表面板：行=会话（点开对应官方页），头部返回主面板"""
+                """打开会话列表面板：行=会话（点开对应官方页），头部返回主面板。
+                数据未就绪时先显示「正在获取会话…」，异步到达后经 WM_USER+1 通知列表重绘（
+                ——修复 Sessions (0)：原来异步加载被当成空数据直接用，永不刷新）"""
                 try:
-                    data = _load_sessions(force=True) or []
-                    actions = [("main", "返回工作台", _panel_route)]
-                    def _mk(key, label):
-                        def fn():
-                            try:
-                                api.open_session(key)
-                            except Exception:
-                                pass
-                        return fn
-                    for d in data[:7]:
-                        actions.append(("row", d.get("label") or "会话", _mk(d.get("key"), d)))
-                    _tray.open_session_panel(_hwnd, {"title": "Sessions", "list": data}, actions)
+                    data = _sessions_cache.get("data")
+                    lst = data if data is not None else []
+                    spec = {"title": "Sessions", "list": lst,
+                            "loading": data is None,
+                            "on_row": _pick_session}
+                    _tray.open_session_panel(_hwnd, spec, [("main", "返回工作台", _panel_route)])
+                    if data is None:
+                        def run():
+                            rows = _load_sessions(force=True) or []
+                            if rows:
+                                spec["list"] = rows
+                                spec["loading"] = False
+                                hm = _tray.menu_find("OcwPanelV2")
+                                if hm:
+                                    try:
+                                        import ctypes as _ct
+                                        _ct.windll.user32.PostMessageW(hm, 0x401, 0, 0)
+                                    except Exception:
+                                        pass
+                        threading.Thread(target=run, daemon=True).start()
                 except Exception as e:
                     wrb_log("[tray] 会话面板异常，回退: %r" % e)
                     _panel_route()
+
+            def _pick_session(i):
+                try:
+                    rows = _sessions_cache.get("data") or []
+                    if 0 <= i < len(rows):
+                        api.open_session(rows[i].get("key") or "")
+                except Exception:
+                    pass
 
             def _panel_route():
                 """右键路由：默认 07 式卡片面板；OCW_PANEL=0 或面板异常 → 系统菜单"""

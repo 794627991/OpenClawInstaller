@@ -108,6 +108,11 @@ def _hook_proc(hwnd, msg, wparam, lparam):
             idx = int(wparam)
             inst = _MENU_INSTANCES.get(int(lparam))
             fn = None
+            if inst is not None and hasattr(inst, "spec") and idx >= 1000 \
+                    and callable(inst.spec.get("on_row")):
+                inst.spec["on_row"](idx - 1000)
+                _dbg("hook on_row(p%d) i=%s" % (int(lparam) & 0xFFFF, idx - 1000))
+                return 0
             if inst is not None and hasattr(inst, "actions") and 0 <= idx < len(inst.actions):
                 fn = inst.actions[idx][2]
                 _dbg("hook EXEC(p%d) idx=%s" % (int(lparam) & 0xFFFF, idx))
@@ -766,6 +771,17 @@ def _mouse_listen_start():
         _dbg("pynput 监听启动失败 %r" % e)
 
 
+def menu_find(cls_name):
+    """按类名返回当前打开的菜单/面板 hwnd（遍历实例表）；无则 0"""
+    for h, inst in list(_MENU_INSTANCES.items()):
+        try:
+            if getattr(inst, "_cls_name", "") == cls_name:
+                return h
+        except Exception:
+            pass
+    return 0
+
+
 class AcrylicPanel:
     """07 式托盘卡片面板 v2：原版配色（近黑深底+浅灰文字+绿/黄/红状态点+蓝 Toggle+分段卡）
     行结构：标题(白,右侧版本小字) / 状态行(点+文字+addr) / 模型行 / 分隔 / Gateway 卡头+badge /
@@ -1035,6 +1051,7 @@ class AcrylicPanel:
                 _dbg("面板 v2 CreateWindowExW 失败")
                 return
             self._hwnd = hwnd
+            self._cls_name = "OcwPanelV1"
             _MENU_INSTANCES[int(hwnd)] = self
             _dbg("面板 v2 创建 hwnd=%s btns=%d h=%d" % (int(hwnd), len(self._btn_rows), self._h))
             user32.ShowWindow(hwnd, 4)   # SW_SHOWNOACTIVATE
@@ -1074,16 +1091,16 @@ def open_panel(owner_hwnd, spec, actions):
 
 
 class AcrylicSessionList:
-    """会话列表面板（07 式左图）：标题+时间 / 模型+token 数 / 上下文进度条（>80% 黄 >95% 红）
-    spec = {"title", "list":[{label,age,model,total,ctx,pct,tokens_text}]}
-    actions = [("main","返回",fn), ("row","会话标题",fn), ("btn","打开官方会话页",fn)]
-    行高 64：标题/时间一行、模型/tokens 一行、进度条一行"""
+    """会话列表面板 v2（行数据 spec['list'] 可变——异步加载完成经 WM_USER+1 刷新重绘）：
+    头部/返回/会话行(标题+时间/模型+token/进度条)/底部提示。
+    命中：返回=actions[0]；行 N → on_row(N)（MSG_ACTION idx=1000+N）；WM_USER+1=数据到达刷新。"""
     WIDTH = 360
     MARGIN = 16
     RADIUS = 14
     ROW_H = 64
     BTN_H = 38
     BTN_GAP = 8
+    MAX_ROWS = 7
 
     C_BG = 0x1C1615
     C_EDGE = 0x362C2A
@@ -1104,8 +1121,8 @@ class AcrylicSessionList:
         self.spec = spec
         self.actions = actions
         self._hwnd = None
-        self._hover = -1
-        self._rows = []          # [(x0,y0,x1,y1,kind,ai)]
+        self._hover = -1        # 命中索引：0=返回，N=行(N-1)；-1 无
+        self._rows = []         # [(x0,y0,x1,y1,kind,val)] kind: back|row
         self._w = self.WIDTH
         self._h = 0
         self._hdr_y = 0
@@ -1114,28 +1131,23 @@ class AcrylicSessionList:
         self._hfont_b = None
         self._hfont_s = None
 
+    def _list(self):
+        return self.spec.get("list") or []
+
     def _calc(self):
         m = self.MARGIN
         y = m
         self._hdr_y = y; y += 30
         self._sep1 = y - 2; y += 11
         self._rows = []
-        i = 0
-        while i < len(self.actions):
-            kind, label, fn = self.actions[i]
-            if kind == "main":
-                self._rows.append((m, y, self.WIDTH - m, y + self.BTN_H, kind, i))
-                y += self.BTN_H + self.BTN_GAP
-                i += 1
-            elif kind == "row":
-                self._rows.append((m, y, self.WIDTH - m, y + self.ROW_H, kind, i))
-                y += self.ROW_H + 4
-                i += 1
-            elif kind == "btn":
-                # 全宽按钮（动作唯一；双列重复渲染是 bug）
-                self._rows.append((m, y, self.WIDTH - m, y + self.BTN_H, "btn", i))
-                y += self.BTN_H + self.BTN_GAP
-                i += 1
+        self._rows.append((m, y, self.WIDTH - m, y + self.BTN_H, "back", 0))
+        y += self.BTN_H + 4
+        n = min(len(self._list()), self.MAX_ROWS)
+        for i in range(n):
+            self._rows.append((m, y, self.WIDTH - m, y + self.ROW_H, "row", 1000 + i))
+            y += self.ROW_H + 4
+        if not n:
+            y += 40      # 空/加载中提示区
         self._h = y + 16
 
     def _font(self):
@@ -1147,9 +1159,9 @@ class AcrylicSessionList:
                                           "Microsoft YaHei UI")
 
     def _hit(self, x, y):
-        for (x0, y0, x1, y1, kind, ai) in self._rows:
+        for (x0, y0, x1, y1, kind, val) in self._rows:
             if x0 <= x <= x1 and y0 <= y <= y1:
-                return ai
+                return val
         return -1
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
@@ -1164,13 +1176,27 @@ class AcrylicSessionList:
                 x, y = int(lparam) & 0xFFFF, (int(lparam) >> 16) & 0xFFFF
                 h = self._hit(x, y)
                 _dbg("会话栏 WM_LBUTTONUP x=%d y=%d hit=%d" % (x, y, h))
-                if 0 <= h < len(self.actions):
+                if h >= 0 and h < len(self.actions):
                     try:
                         user32.PostMessageW(self.owner, MSG_ACTION_FROM_MENU, h, int(hwnd))
-                        _dbg("会话栏已 post owner msg_action h=%s (带面板 hwnd)" % h)
                     except Exception as e:
                         _dbg("会话栏 post 失败 %r" % e)
-                user32.DestroyWindow(hwnd)
+                    user32.DestroyWindow(hwnd)
+                    return 0
+                elif h >= 1000:
+                    # 会话行 → on_row(i)（EXEC 处理器分发）
+                    try:
+                        user32.PostMessageW(self.owner, MSG_ACTION_FROM_MENU, h, int(hwnd))
+                        _dbg("会话栏已 post row h=%s" % h)
+                    except Exception as e:
+                        _dbg("会话栏 row post 失败 %r" % e)
+                    user32.DestroyWindow(hwnd)
+                    return 0
+                user32.DestroyWindow(hwnd)   # 空白点击关闭
+            elif msg == 0x401:   # WM_USER+1：异步数据到达 → 重算+重绘
+                self._calc()
+                user32.InvalidateRect(hwnd, None, True)
+                return 0
             elif msg == WM_PAINT:
                 self._paint(hwnd)
                 return 0
@@ -1206,8 +1232,8 @@ class AcrylicSessionList:
             gdi32.RoundRect(hdc, 0, 0, w, h, self.RADIUS * 2, self.RADIUS * 2)
             gdi32.DeleteObject(brush)
             gdi32.DeleteObject(pen)
-            lst = self.spec.get("list") or []
-            # 头部：标题 + 计数
+            lst = self._list()
+            # 头部
             gdi32.SelectObject(hdc, self._hfont_b)
             gdi32.SetTextColor(hdc, self.C_TXT)
             t = "%s (%d)" % (self.spec.get("title", "Sessions"), len(lst))
@@ -1223,13 +1249,27 @@ class AcrylicSessionList:
             gdi32.MoveToEx(hdc, m, self._sep1, None)
             gdi32.LineTo(hdc, w - m, self._sep1)
             gdi32.DeleteObject(pen)
-            # 列表项：row 三线（标题/时间、模型/tokens、进度条）
-            row_i = 0
-            for (x0, y0, x1, y1, kind, ai) in self._rows:
-                if kind == "row":
-                    d = lst[row_i] if row_i < len(lst) else {}
-                    row_i += 1
-                    if self._hover == ai:
+            # 行
+            idx = 0
+            for (x0, y0, x1, y1, kind, val) in self._rows:
+                if kind == "back":
+                    label = self.actions[0][1] if self.actions else "返回"
+                    hv = self._hover == 0
+                    bg = self.C_BTN_HOVER if hv else self.C_BTN
+                    brush = gdi32.CreateSolidBrush(bg)
+                    gdi32.SelectObject(hdc, brush)
+                    gdi32.RoundRect(hdc, x0, y0, x1, y1, 18, 18)
+                    gdi32.DeleteObject(brush)
+                    gdi32.SelectObject(hdc, self._hfont)
+                    gdi32.SetTextColor(hdc, 0xD0D2DA)
+                    sz = _SIZEX()
+                    gdi32.GetTextExtentPoint32W(hdc, label, len(label), ctypes.byref(sz))
+                    gdi32.TextOutW(hdc, (x0 + x1 - sz.cx) // 2,
+                                   y0 + (y1 - y0 - sz.cy) // 2, label, len(label))
+                elif kind == "row" and idx < len(lst):
+                    d = lst[idx]
+                    idx += 1
+                    if self._hover == val:
                         brush = gdi32.CreateSolidBrush(self.C_ROWHOVER)
                         gdi32.SelectObject(hdc, brush)
                         gdi32.RoundRect(hdc, x0, y0, x1, y1, 10, 10)
@@ -1252,7 +1292,6 @@ class AcrylicSessionList:
                     gdi32.SetTextAlign(hdc, TA_RIGHT)
                     gdi32.TextOutW(hdc, x1 - 12, y0 + 34, tkx, len(tkx))
                     gdi32.SetTextAlign(hdc, TA_LEFT)
-                    # 上下文进度条
                     bx0, bx1 = x0 + 12, x1 - 12
                     by = y0 + 54
                     brush = gdi32.CreateSolidBrush(self.C_BAR_BG)
@@ -1272,22 +1311,14 @@ class AcrylicSessionList:
                         gdi32.SelectObject(hdc, brush)
                         gdi32.RoundRect(hdc, bx0, by, bx0 + fill, by + 5, 4, 4)
                         gdi32.DeleteObject(brush)
-                else:
-                    label = self.actions[ai][1]
-                    hv = self._hover == ai
-                    bg = self.C_BTN_HOVER if hv else self.C_BTN
-                    brush = gdi32.CreateSolidBrush(bg)
-                    gdi32.SelectObject(hdc, brush)
-                    gdi32.RoundRect(hdc, x0, y0, x1, y1, 18, 18)
-                    gdi32.DeleteObject(brush)
-                    gdi32.SelectObject(hdc, self._hfont)
-                    gdi32.SetTextColor(hdc, 0xD0D2DA)
-                    sz = _SIZEX()
-                    gdi32.GetTextExtentPoint32W(hdc, label, len(label), ctypes.byref(sz))
-                    gdi32.TextOutW(hdc, (x0 + x1 - sz.cx) // 2,
-                                   y0 + (y1 - y0 - sz.cy) // 2, label, len(label))
+            # 空态/加载中
+            if not lst:
+                gdi32.SelectObject(hdc, self._hfont)
+                gdi32.SetTextColor(hdc, self.C_WEAK)
+                msg_txt = "正在获取会话…" if self.spec.get("loading") else "暂无会话（过去 24 小时）"
+                gdi32.TextOutW(hdc, m, self._hdr_y + 70, msg_txt, len(msg_txt))
             user32.EndPaint(hwnd, ctypes.byref(ps))
-            _dbg("会话栏 WM_PAINT 完成 rows=%d items=%d" % (len(self._rows), len(lst)))
+            _dbg("会话栏 v2 WM_PAINT 完成 rows=%d items=%d" % (len(self._rows), len(lst)))
         except Exception:
             try:
                 import traceback as _tb
@@ -1302,7 +1333,6 @@ class AcrylicSessionList:
             self._calc()
             self._font()
             w, h = self._w, self._h
-            # 锚定主面板左侧并排（07 样式）；无主面板/放不下时按光标侧弹
             class _RECT(ctypes.Structure):
                 _fields_ = [("l", ctypes.c_long), ("t", ctypes.c_long),
                             ("r", ctypes.c_long), ("b", ctypes.c_long)]
@@ -1331,6 +1361,7 @@ class AcrylicSessionList:
                 _dbg("会话栏 CreateWindowExW 失败")
                 return
             self._hwnd = hwnd
+            self._cls_name = "OcwPanelV2"
             _MENU_INSTANCES[int(hwnd)] = self
             _dbg("会话栏创建 hwnd=%s rows=%d h=%d" % (int(hwnd), len(self._rows), self._h))
             user32.ShowWindow(hwnd, 4)   # SW_SHOWNOACTIVATE
@@ -1344,7 +1375,7 @@ class AcrylicSessionList:
             _dbg("会话栏线程异常 %r" % e)
 
     def show(self):
-        """并排模式：保留主面板 OcwPanelV1（列表在它旁边新开），只清理旧列表面板"""
+        """并排模式：保留主面板 OcwPanelV1，只清理旧列表面板"""
         try:
             user32.GetClassNameW.restype = ctypes.c_int
             user32.GetClassNameW.argtypes = [wintypes.HWND, ctypes.c_void_p, ctypes.c_int]
@@ -1360,3 +1391,5 @@ class AcrylicSessionList:
         import threading as _th
         _th.Thread(target=self._thread_show, daemon=True).start()
         return None
+
+
