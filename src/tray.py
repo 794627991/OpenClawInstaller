@@ -780,6 +780,20 @@ def _mouse_listen_start():
         _dbg("pynput 监听启动失败 %r" % e)
 
 
+def _set_dwm_corners(hwnd):
+    """Win11 窗口圆角（DWMWA_WINDOW_CORNER_PREFERENCE=2）；Win10 静默忽略。
+    面板背景 GDI 圆角只是"涂色范围"，窗口四角系统仍按直角裁剪——需 DWM 层生效"""
+    try:
+        dwm = ctypes.windll.dwmapi
+        DWMWA_WINDOW_CORNER_PREFERENCE = 33
+        dwm.DwmSetWindowAttribute.restype = ctypes.c_long
+        val = ctypes.c_int(2)
+        dwm.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
+                                  ctypes.byref(val), ctypes.sizeof(val))
+    except Exception:
+        pass
+
+
 def menu_find(cls_name):
     """按类名返回当前打开的菜单/面板 hwnd（遍历实例表）；无则 0"""
     for h, inst in list(_MENU_INSTANCES.items()):
@@ -1038,7 +1052,9 @@ class AcrylicPanel:
                     if right:
                         gdi32.SelectObject(hdc, self._hfont_s)
                         gdi32.SetTextColor(hdc, self.C_SUB)
-                        gdi32.TextOutW(hdc, x0 + 18, y0 + 11, right, len(right))
+                        gdi32.SetTextAlign(hdc, TA_RIGHT)
+                        gdi32.TextOutW(hdc, x1 - 42, y0 + 11, right, len(right))
+                        gdi32.SetTextAlign(hdc, TA_LEFT)
                     gdi32.SetTextColor(hdc, self.C_SUB)
                     gdi32.SelectObject(hdc, self._hfont)
                     gdi32.TextOutW(hdc, x1 - 26, y0 + 8, ">", 1)
@@ -1081,6 +1097,7 @@ class AcrylicPanel:
             _MENU_INSTANCES[int(hwnd)] = self
             _MENU_ACTION_MAP[int(hwnd)] = (self.actions, self.spec)
             _dbg("面板 v2 创建 hwnd=%s btns=%d h=%d" % (int(hwnd), len(self._btn_rows), self._h))
+            _set_dwm_corners(hwnd)
             user32.ShowWindow(hwnd, 4)   # SW_SHOWNOACTIVATE
             _mouse_listen_start()
             msg = wintypes.MSG()
@@ -1384,6 +1401,7 @@ class AcrylicSessionList:
             _MENU_INSTANCES[int(hwnd)] = self
             _MENU_ACTION_MAP[int(hwnd)] = (self.actions, self.spec)
             _dbg("会话栏创建 hwnd=%s rows=%d h=%d" % (int(hwnd), len(self._rows), self._h))
+            _set_dwm_corners(hwnd)
             user32.ShowWindow(hwnd, 4)   # SW_SHOWNOACTIVATE
             _mouse_listen_start()
             msg = wintypes.MSG()
