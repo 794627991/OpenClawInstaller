@@ -1642,7 +1642,16 @@ def main():
                     _tray_obj.destroy()
                 except Exception:
                     pass
-                os._exit(0)
+                # os._exit 会被 .NET/WebView2 的 DLL detach 钩子拖 2-3s（实测 2343ms）——
+                # TerminateProcess 绕过一切卸载钩子（实测 294ms）——立即退出
+                try:
+                    import ctypes as _c
+                    k = _c.windll.kernel32
+                    k.GetCurrentProcess.restype = _c.c_void_p
+                    k.TerminateProcess.argtypes = [_c.c_void_p, _c.c_uint]
+                    k.TerminateProcess(k.GetCurrentProcess(), 0)
+                except Exception:
+                    os._exit(0)
             def _refresh():
                 gw = api._ping_http()
                 ver = core.get_openclaw_version() or "未安装"
